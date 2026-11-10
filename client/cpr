@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# CPR client: Bash, curl, jq, OpenSSH; rsync for checkout.
+set -euo pipefail
+umask 077
+
+fail() { printf 'cpr: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
+usage() {
+  cat <<'HELP'
+Usage: cpr COMMAND
+
+  help          List commands
+  status        List tracked pull requests
+  workers       List workers and their assignments
+  add URL       Add one GitHub pull request
+  checkout ID   Copy the worker checkout locally
+  connect ID    Open Codex; snapshot edits when you exit successfully
+  approve ID    Approve the prepared changes for publication
+
+ID is the CPR ID shown by status.
+Configuration: ~/.config/cpr/config
+HELP
+}
+
+command_name=${1:-help}
+if (($#)); then shift; fi
+case "$command_name" in
+  help)
+    (($# == 0)) || fail 'Usage: cpr help'
+    usage
+    exit 0 ;;
+  status|workers)
+    (($# == 0)) || fail "Usage: cpr $command_name" ;;
+  add)
+    (($# == 1)) || fail 'Usage: cpr add URL (one PR at a time)' ;;
+  checkout|connect|approve)
+    (($# == 1)) || fail "Usage: cpr $command_name ID" ;;
+  *) fail "Unknown command: $command_name. Run cpr help." ;;
+esac
+
+config_file=$HOME/.config/cpr/config
+[[ -f $config_file ]] || fail "Missing $config_file. Copy client/config there and edit it."
+declare -A settings=()
+line_number=0
+while IFS= read -r line || [[ -n $line ]]; do
+  ((line_number += 1))
+  line=${line%$'\r'}
+  [[ $line =~ ^[[:space:]]*(#.*)?$ ]] && continue
+  [[ $line =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || fail "$config_file:$line_number: expected KEY=value"
+  key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
+  case "$key" in
+    CPR_API_URL|CPR_CHECKOUT_DIR|CPR_HTTP_TIMEOUT) settings[$key]=$value ;;
+    *) fail "$config_file:$line_number: unknown setting $key" ;;
+  esac
+done < "$config_file"
+for key in CPR_API_URL CPR_CHECKOUT_DIR CPR_HTTP_TIMEOUT; do
+  [[ -n ${settings[$key]:-} ]] || fail "Set $key in $config_file"
+done
+[[ ${settings[CPR_API_URL]} =~ ^https?://[^[:space:]]+$ && ${settings[CPR_API_URL]} != *'?'* && ${settings[CPR_API_URL]} != *'#'* ]] || fail 'CPR_API_URL must be an http:// or https:// base URL'
+[[ ${settings[CPR_HTTP_TIMEOUT]} =~ ^[1-9][0-9]{0,3}$ ]] && ((settings[CPR_HTTP_TIMEOUT] <= 3600)) || fail 'CPR_HTTP_TIMEOUT must be 1 to 3600 seconds'
+case "${settings[CPR_CHECKOUT_DIR]}" in
+  '~/'*) settings[CPR_CHECKOUT_DIR]="$HOME/${settings[CPR_CHECKOUT_DIR]:2}" ;;
+esac
+[[ ${settings[CPR_CHECKOUT_DIR]} == /* ]] || fail 'CPR_CHECKOUT_DIR must be an absolute path or start with ~/'
+
+request() {
+  local method=$1 path=$2 data=${3:-} response code body
+  need curl; need jq
+  local -a args=(--disable --silent --show-error --connect-timeout 10
+    --max-time "${settings[CPR_HTTP_TIMEOUT]}" --request "$method"
+    --proto '=http,https' --header 'Accept: application/json'
+    --header 'Content-Type: application/json' --write-out $'\n%{http_code}')
+  if [[ -n $data ]]; then args+=(--data-raw "$data"); fi
+  if ! response=$(curl "${args[@]}" "${settings[CPR_API_URL]%/}$path"); then
+    fail "Cannot reach ${settings[CPR_API_URL]}. Check ~/.config/cpr/config and the SSH connection to the server."
+  fi
+  code=${response##*$'\n'}; body=${response%$'\n'*}
+  if [[ ! $code =~ ^2[0-9][0-9]$ ]]; then
+    [[ -z $body ]] || printf '%s\n' "${body:0:1500}" >&2
+    fail "HTTP $code from $path"
+  fi
+  [[ -n $body ]] || body='null'
+  jq -e 'true' <<< "$body" >/dev/null || fail "Invalid JSON response from $path"
+  printf '%s\n' "$body"
+}
+
+print_table() {
+  jq -r '
+    def pad($n): . + (" " * ($n - length));
+    (.[0] | length) as $columns |
+    [range($columns) as $i | [.[][$i] | tostring | length] | max] as $widths |
+    .[] | [range($columns) as $i | .[$i] | tostring | pad($widths[$i])] | join("  ")'
+}
+valid_id() { [[ $1 =~ ^[1-9][0-9]*$ ]] || fail 'ID must be a positive CPR ID from cpr status'; }
+worker_host() {
+  local host
+  host=$(jq -r '.sshHost // empty' <<< "$1")
+  [[ -n $host ]] || fail 'This PR has no assigned worker yet.'
+  [[ $host =~ ^cpr-10[1-9]$ ]] || fail "Unexpected worker SSH alias: $host"
+  printf '%s' "$host"
+}
+
+case "$command_name" in
+  status|workers)
+    (($# == 0)) || fail "Usage: cpr $command_name"
+    endpoint=/api/status
+    [[ $command_name != workers ]] || endpoint=/api/worker
+    result=$(request GET "$endpoint")
+    if [[ $command_name == status ]]; then
+      jq '[ ["ID", "PR", "Repository", "Target", "Status"], (.[] | [.id, .number, .repository, .targetBranch, .status]) ]' <<< "$result" | print_table
+    else
+      jq '[ ["Worker", "SSH host", "Status", "CPR ID"], (.[] | [.id, .sshHost, .status, (.pullRequestId // "-")]) ]' <<< "$result" | print_table
+    fi ;;
+  add)
+    (($# == 1)) || fail 'Usage: cpr add URL (one PR at a time)'
+    url=$1
+    [[ $url =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*/?$ ]] || fail "Invalid GitHub PR URL: $url"
+    need jq
+    payload=$(jq -cn --arg url "$url" '{url: $url}')
+    result=$(request POST /api/pr "$payload")
+    jq -r '"\(.id)  PR #\(.number)  \(.repository) -> \(.targetBranch)  \(.status)"' <<< "$result" ;;
+  approve)
+    (($# == 1)) || fail 'Usage: cpr approve ID'
+    valid_id "$1"
+    result=$(request POST "/api/pr/$1/approve")
+    jq -r '.message' <<< "$result" ;;
+  connect)
+    (($# == 1)) || fail 'Usage: cpr connect ID'
+    id=$1; valid_id "$id"; need ssh
+    result=$(request POST "/api/pr/$id/connect")
+    if [[ -z $(jq -r '.sshHost // empty' <<< "$result") ]]; then
+      printf 'PR %s: no worker assigned yet. Run cpr connect %s once a worker is ready.\n' "$id" "$id"
+      exit 0
+    fi
+    host=$(worker_host "$result")
+    session=$(jq -r '.sessionId // empty' <<< "$result")
+    [[ $session =~ ^[A-Za-z0-9_-]{6,128}$ ]] || session=''
+    printf 'Opening Codex for PR %s on %s...\n' "$id" "$host"
+    remote_command='cd /workspace/repo && codex'
+    [[ -z $session ]] || remote_command+=" resume $session"
+    if ! ssh -t -o StrictHostKeyChecking=yes "$host" "$remote_command"; then
+      fail 'Codex session did not exit successfully; edits remain on the worker.'
+    fi
+    result=$(request POST "/api/pr/$id/complete")
+    jq -r '"PR \(.id): \(.status); snapshot \(.preparedSha)"' <<< "$result" ;;
+  checkout)
+    (($# == 1)) || fail 'Usage: cpr checkout ID'
+    valid_id "$1"; need ssh; need rsync
+    result=$(request GET "/api/pr/$1/connection")
+    host=$(worker_host "$result")
+    mkdir -p -- "${settings[CPR_CHECKOUT_DIR]}"
+    destination=$(mktemp -d "${settings[CPR_CHECKOUT_DIR]}/pr-$1-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+    if ! rsync -a --safe-links --no-specials --no-devices --no-owner --no-group --protect-args \
+      -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' "$host:/workspace/repo/" "$destination/"; then
+      fail "Checkout failed; partial copy retained at $destination. The worker needs rsync installed."
+    fi
+    printf 'Local checkout: %s\n' "$destination" ;;
+  *) fail "Unknown command: $command_name. Run cpr help." ;;
+esac

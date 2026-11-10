@@ -1,0 +1,26 @@
+{
+	"$schema": "https://json.schemastore.org/launchsettings.json",
+	"profiles": {
+		"CPR": {
+			"commandName": "Project",
+			"dotnetRunMessages": true,
+			"launchBrowser": false,
+			"applicationUrl": "http://localhost:5000",
+			"environmentVariables": {
+				"ASPNETCORE_ENVIRONMENT": "Development"
+			}
+		},
+		"Docker": {
+			"commandName": "Docker",
+			"launchBrowser": false,
+			"environmentVariables": {
+				"ASPNETCORE_ENVIRONMENT": "Development",
+				"ASPNETCORE_URLS": "http://127.0.0.1:5000",
+				"CPR__GitStoragePath": "/data/git"
+			},
+			"publishAllPorts": false,
+			"useSSL": false,
+			"containerRunArguments": "--network host --mount type=bind,source=\"{ProjectDir}/appsettings.Private.json\",target=/app/appsettings.Private.json,readonly"
+		}
+	}
+}

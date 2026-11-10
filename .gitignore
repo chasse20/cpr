@@ -1,0 +1,12 @@
+.env
+.env.*
+*.key
+*.pem
+**/bin/
+**/obj/
+**/__pycache__/
+**/*.pyc
+server/data/
+orchestrator/data/
+appsettings.Private.json
+*.csproj.user

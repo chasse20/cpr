@@ -1,0 +1,9 @@
+.git
+.env
+appsettings.Private.json
+data/
+**/bin/
+**/obj/
+*.key
+*.pem
+*.user
