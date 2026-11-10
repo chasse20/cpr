@@ -136,8 +136,9 @@ case "$command_name" in
     session=$(jq -r '.sessionId // empty' <<< "$result")
     [[ $session =~ ^[A-Za-z0-9_-]{6,128}$ ]] || session=''
     printf 'Opening Codex for PR %s on %s...\n' "$id" "$host"
-    remote_command='cd /workspace/repo && codex'
+    remote_command="flock -n --close /state/cpr/worker.lock bash -c 'test \"\$(cat /state/cpr/active-id)\" = \"$id\" && test ! -f /state/cpr/released-$id && cd /workspace/repo && exec codex --sandbox workspace-write"
     [[ -z $session ]] || remote_command+=" resume $session"
+    remote_command+="'"
     if ! ssh -t -o StrictHostKeyChecking=yes "$host" "$remote_command"; then
       fail 'Codex session did not exit successfully; edits remain on the worker.'
     fi

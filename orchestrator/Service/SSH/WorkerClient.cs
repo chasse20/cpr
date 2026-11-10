@@ -112,6 +112,8 @@ namespace CPR.Service.SSH
 			ARCHIVE="${CPR_ARCHIVE:-/workspace/archive}"
 			JOB="$STATE/jobs/$ID"
 			mkdir -p "$STATE/jobs"
+			exec 9> "$STATE/worker.lock"
+			flock -n 9 || { echo 'Worker is busy; preserving its active session' >&2; exit 12; }
 			valid_id() { [[ "$ID" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid CPR ID' >&2; exit 2; }; }
 			ready_repo() { test -d "$ROOT/.git" || { echo "Missing checkout: $ROOT" >&2; exit 3; }; }
 			""";
@@ -124,7 +126,7 @@ namespace CPR.Service.SSH
 			previous=''
 			if test -f "$STATE/active-id"; then previous="$(cat "$STATE/active-id")"; fi
 			if test -e "$ROOT" && test "$(ls -A "$ROOT" 2>/dev/null | wc -l)" -gt 0; then
-			  if test "$previous" != "$ID"; then
+			  if test "$previous" != "$ID" || test -f "$STATE/released-$ID"; then
 			    test -n "$previous" || { echo 'Unowned workspace: not replacing' >&2; exit 5; }
 			    test -f "$STATE/released-$previous" || { echo 'Worker not released: preserving checkout' >&2; exit 5; }
 			    test -d "$ROOT/.git" || { echo 'Not a Git checkout: preserving workspace' >&2; exit 5; }
@@ -135,10 +137,12 @@ namespace CPR.Service.SSH
 			    mv "$ROOT" "$ARCHIVE/pr-${previous}-$(date -u +%Y%m%dT%H%M%SZ)"
 			  fi
 			fi
+			is_new=0
 			if ! test -d "$ROOT/.git"; then
 			  git clone --no-checkout "https://github.com/$repository.git" "$ROOT"
 			  git -C "$ROOT" fetch --no-tags origin "refs/pull/$number/head"
 			  git -C "$ROOT" checkout --detach FETCH_HEAD
+			  is_new=1
 			fi
 			ready_repo
 			# Git needs an identity even for --no-commit merges, but no commit is made
@@ -152,7 +156,12 @@ namespace CPR.Service.SSH
 			mkdir -p "$JOB"
 			printf '%s\n' "$ID" > "$STATE/active-id"
 			printf '%s\n' "$url" > "$JOB/url"
-			git -C "$ROOT" rev-parse HEAD > "$JOB/base-sha"
+			if test "$is_new" = 1; then
+			  git -C "$ROOT" rev-parse HEAD > "$JOB/base-sha"
+			  : > "$JOB/events.jsonl"
+			  rm -f "$STATE/released-$ID" "$JOB/tree"
+			fi
+			test -s "$JOB/base-sha" || { echo 'Incomplete checkout preparation; preserve workspace for inspection' >&2; exit 5; }
 			""";
 
 		private const string RUN_COMMANDS = """
@@ -172,7 +181,7 @@ namespace CPR.Service.SSH
 			  fi
 			fi
 			codex exec --json --sandbox workspace-write -C "$ROOT" "$prompt" \
-			  > "$JOB/events.jsonl" 2> "$JOB/codex.stderr"
+			  > "$JOB/events.jsonl" 2> "$JOB/codex.stderr" 9>&-
 			""";
 
 		private const string SNAPSHOT_COMMANDS = """
@@ -182,9 +191,10 @@ namespace CPR.Service.SSH
 			test "$(git -C "$ROOT" rev-parse HEAD)" = "$(cat "$JOB/base-sha")" || {
 			  echo 'Unexpected pre-approval Git commit; preserve workspace and escalate' >&2; exit 6;
 			}
-			# Agent report is not part of the code change.
-			if test -f "$ROOT/CPR_REVIEW.md"; then
-			  mv "$ROOT/CPR_REVIEW.md" "$JOB/report.md"
+			# Keep reports outside the checkout so a tracked file is never removed.
+			report="/tmp/cpr-review-$ID.md"
+			if test -f "$report"; then
+			  mv "$report" "$JOB/report.md"
 			fi
 			git -C "$ROOT" add -A
 			# Refuse to snapshot common secrets; user can inspect/repair via interactive session.
@@ -207,6 +217,12 @@ namespace CPR.Service.SSH
 			test "$(cat "$STATE/active-id")" = "$ID" || exit 5
 			expected="$(decode "$DATA64")"
 			[[ "$expected" =~ ^[a-f0-9]{40}$ ]] || exit 2
+			test "$(git -C "$ROOT" rev-parse HEAD)" = "$(cat "$JOB/base-sha")" || {
+			  echo 'Unexpected pre-approval Git commit; preserving workspace' >&2; exit 6;
+			}
+			git -C "$ROOT" diff --quiet && test -z "$(git -C "$ROOT" ls-files --others --exclude-standard)" || {
+			  echo 'Worker has edits outside the approved snapshot; complete the session again' >&2; exit 9;
+			}
 			current="$(git -C "$ROOT" write-tree)"
 			test "$current" = "$expected" || { echo 'Approved tree no longer matches worker tree' >&2; exit 9; }
 			test "$(cat "$JOB/tree")" = "$expected" || exit 9
@@ -216,10 +232,12 @@ namespace CPR.Service.SSH
 			git -C "$ROOT" config user.email "$user_email"
 			git -C "$ROOT" -c user.name="$user_name" -c user.email="$user_email" \
 			  commit -m "CPR review #$ID" >/dev/null || {
-			    # A no-change PR keeps its existing commit; no new unauthorized commit.
+			    # A no-change PR keeps its existing commit; an unfinished merge must not be published
+			    test ! -f "$ROOT/.git/MERGE_HEAD" || exit 10
 			    test "$(git -C "$ROOT" rev-parse HEAD^{tree})" = "$expected" || exit 10
 			  }
 			sha="$(git -C "$ROOT" rev-parse HEAD)"
+			printf '%s\n' "$sha" > "$JOB/base-sha"
 			printf 'CPR_COMMIT|%s\n' "$sha"
 			""";
 

@@ -17,7 +17,7 @@ Work advances independently for each repository and target branch. Each assigned
 
 ```mermaid
 flowchart TD
-    Add["cpr add PR URLs<br/>Assign permanent CPR ID and merge lane"]
+    Add["cpr add PR URL<br/>Assign permanent CPR ID and merge lane"]
     Queue["WaitingToBeProcessed"]
     Work["Processing<br/>Codex reviews, repairs, tests"]
     Approve["ReadyForApproval<br/>Worker and Codex session retained"]
@@ -52,7 +52,7 @@ flowchart TD
     Next -.->|When next PR is CI-passed| Turn
 ```
 
-`cpr add` queues one pull request. The orchestrator assigns a worker and prepares it for review. `cpr connect` opens Codex on that worker and snapshots edits when the session exits successfully. `cpr approve` authorizes publication of the prepared changes. Failed CI requires interactive recovery through `cpr connect`.
+`cpr add` queues one pull request. The orchestrator assigns a worker and prepares it for review. `cpr connect` opens Codex on that worker and snapshots edits when the session exits successfully. `cpr approve` authorizes publication of the prepared changes. Failed CI requires interactive recovery through `cpr connect`. Failed or interrupted reviews can also be reopened with `cpr connect`; a worker accepts only one active operation at a time.
 
 ## Orchestrator
 
@@ -84,6 +84,8 @@ Run one orchestrator instance. Public GitHub PR checkouts are supported; private
 
 Prompt kinds are `InitialReview` and `MergeConflict`. Templates support `{{PullRequestUrl}}`, `{{Repository}}`, `{{TargetBranch}}`, `{{Number}}`, and `{{CprId}}`. CI recovery takes its instructions from the interactive session.
 
+Both seeded prompts follow applicable `AGENTS.md`, `CODE_STYLE.md`, and `docs/helpful-pr-review-guidelines.md`. The merge prompt also reviews the resolved result. Reports are written outside the checkout and retained under `/state/cpr/jobs/ID/report.md` on the worker.
+
 ## Workers
 
 `server/` contains `compose.yaml` and the worker `Dockerfile`. Compose uses the published orchestrator image directly and builds the Codex/Git/SSH worker image on the server. A separate worker image does not need to be pushed to a registry.
@@ -91,6 +93,8 @@ Prompt kinds are `InitialReview` and `MergeConflict`. Templates support `{{PullR
 The example has nine workers: 101–103 use GPU `0`, 104–106 use GPU `1`, and 107–109 use GPU `2`. Each worker defines its own `device_ids`; GPU indices and UUIDs are supported. Change these assignments to match the machine, or remove a worker's `deploy` block to run it without a GPU.
 
 Compose creates the SSH identities, worker Git configuration, and persistent directories under `data/`. Checkouts, Codex state, and SSH identities survive container restarts. Back up `data/` and the SQL Server database when moving the deployment.
+
+Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces inside Docker. Codex runs with `workspace-write`; the worker root filesystem remains read-only, and GitHub publication credentials stay in the orchestrator.
 
 ## Client
 
@@ -219,6 +223,14 @@ Host cpr-109
     Port 22109
     HostKeyAlias cpr-109
 ```
+
+Sign in with your ChatGPT account on each worker, using its SSH alias:
+
+```sh
+ssh -t cpr-101 codex login --device-auth
+```
+
+Repeat for `cpr-102` through `cpr-109`. Codex credentials persist in each worker's state directory.
 
 After signing in to Codex on the workers, set `run-workers` and `publish-approved` to `'true'` in the server's `compose.yaml` and run `docker compose up -d` again. Publication still requires `cpr approve ID`.
 

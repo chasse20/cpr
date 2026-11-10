@@ -28,7 +28,8 @@ x-worker: &worker
   tty: true
   cap_drop: [ALL]
   cap_add: [SETUID, SETGID, CHOWN, SYS_CHROOT, DAC_OVERRIDE]
-  security_opt: ['no-new-privileges:true']
+  # Allow Codex to create its sandbox namespaces inside the worker
+  security_opt: ['no-new-privileges:true', 'seccomp=unconfined']
   pids_limit: 2048
   shm_size: 1gb
   tmpfs:
@@ -317,6 +318,6 @@ configs:
       - Follow the orchestrator's prompt and any repository-local review guidelines.
       - Make and test changes in `/workspace/repo`.
       - Do not create Git commits or push to any Git remote before explicit CPR approval.
-      - Do not modify `/state` except through the worker helper; store your report at `/workspace/repo/CPR_REVIEW.md`.
+      - Do not edit CPR job state under `/state`. Write the review report to the `/tmp/cpr-review-ID.md` path specified in the prompt, outside the Git checkout.
       - Do not change unrelated files, credentials, SSH configuration, or the orchestrator.
       - If missing logs or context prevent a reliable fix, describe the blocker instead of guessing.

@@ -100,30 +100,24 @@ namespace CPR.Controller
 		[HttpPost( "{id:long}/connect" )]
 		public async Task<IActionResult> ConnectAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
+			PullRequest? tempRequest;
+
 			await tGate.Mutex.WaitAsync( tCancel );
 
 			try
 			{
-				PullRequest? tempRequest = await tContext.PullRequest.Include( x => x.Worker ).SingleOrDefaultAsync( x => x.PullRequestId == tId, tCancel );
+				tempRequest = await tContext.PullRequest.Include( x => x.Worker ).SingleOrDefaultAsync( x => x.PullRequestId == tId, tCancel );
 
 				if ( tempRequest is null )
 				{
 					return NotFound();
 				}
 
-				if ( tempRequest.ApprovedSha is not null )
+				if ( tempRequest.ApprovedSha is not null || tGate.Running.ContainsKey( tId ) )
 				{
 					return Conflict( new
 					{
-						Error = "Approved changes are being published"
-					} );
-				}
-
-				if ( tempRequest.Status == PullRequestStatus.Processing && tempRequest.WorkReason != PullRequestWorkReason.CiRecovery )
-				{
-					return Conflict( new
-					{
-						Error = "Automated review is still running; connect after it finishes"
+						Error = "Worker operation is still running; connect after it finishes"
 					} );
 				}
 
@@ -138,40 +132,32 @@ namespace CPR.Controller
 					await tContext.SaveChangesAsync( tCancel );
 				}
 
-				return Ok( GetConnection( tempRequest ) );
+				if ( tempRequest.Worker is null )
+				{
+					return Ok( GetConnection( tempRequest ) );
+				}
+
+				if ( tempRequest.Status is not ( PullRequestStatus.Processing or PullRequestStatus.ReadyForApproval ) || !tGate.Running.TryAdd( tId, Task.CompletedTask ) )
+				{
+					return Conflict( new
+					{
+						Error = "No active editable worker session"
+					} );
+				}
 			}
 			finally
 			{
 				tGate.Mutex.Release();
 			}
-		}
-
-		[HttpPost( "{id:long}/complete" )]
-		public async Task<IActionResult> CompleteAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
-		{
-			PullRequest? tempRequest = await tContext.PullRequest.Include( x => x.Worker ).AsNoTracking().SingleOrDefaultAsync( x => x.PullRequestId == tId, tCancel );
-
-			if ( tempRequest?.Worker is null || tempRequest.Status is not ( PullRequestStatus.Processing or PullRequestStatus.ReadyForApproval ) )
-			{
-				return Conflict( new
-				{
-					Error = "No active editable worker session"
-				} );
-			}
-
-			if ( tempRequest.Status == PullRequestStatus.Processing && tempRequest.WorkReason != PullRequestWorkReason.CiRecovery )
-			{
-				return Conflict( new
-				{
-					Error = "Automated Codex execution is still active"
-				} );
-			}
-
-			WorkerSnapshot tempSnapshot;
 
 			try
 			{
-				tempSnapshot = await tWorkers.SnapshotAsync( tempRequest.Worker, tempRequest, tCancel );
+				// Preserve interrupted work and verify the checkout before returning its SSH host
+				await tWorkers.PrepareInteractiveAsync( tempRequest.Worker, tempRequest, tCancel );
+
+				PullRequest? tempCurrent = await tContext.PullRequest.Include( x => x.Worker ).AsNoTracking().SingleOrDefaultAsync( x => x.PullRequestId == tId, tCancel );
+
+				return tempCurrent is null ? NotFound() : Ok( GetConnection( tempCurrent ) );
 			}
 			catch ( Exception tException ) when ( !tCancel.IsCancellationRequested )
 			{
@@ -180,37 +166,90 @@ namespace CPR.Controller
 					Error = tException.Message
 				} );
 			}
+			finally
+			{
+				tGate.Running.TryRemove( tId, out _ );
+			}
+		}
+
+		[HttpPost( "{id:long}/complete" )]
+		public async Task<IActionResult> CompleteAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
+		{
+			PullRequest? tempRequest;
 
 			await tGate.Mutex.WaitAsync( tCancel );
 
 			try
 			{
-				PullRequest? tempCurrent = await tContext.PullRequest.FindAsync( [ tId ], tCancel );
+				tempRequest = await tContext.PullRequest.Include( x => x.Worker ).AsNoTracking().SingleOrDefaultAsync( x => x.PullRequestId == tId, tCancel );
 
-				if ( tempCurrent is null || tempCurrent.WorkerId != tempRequest.WorkerId || tempCurrent.ApprovedSha is not null )
+				if ( tempRequest?.Worker is null || tempRequest.Status is not ( PullRequestStatus.Processing or PullRequestStatus.ReadyForApproval ) || tempRequest.ApprovedSha is not null )
 				{
 					return Conflict( new
 					{
-						Error = "Session or approval changed during snapshot"
+						Error = "No active editable worker session"
 					} );
 				}
 
-				tempCurrent.PreparedSha = tempSnapshot.TreeSha;
-				tempCurrent.SessionId = tempSnapshot.SessionId ?? tempCurrent.SessionId;
-				tempCurrent.Status = PullRequestStatus.ReadyForApproval;
-				tempCurrent.LastError = null;
-				await tContext.SaveChangesAsync( tCancel );
-
-				return Ok( new
+				if ( !tGate.Running.TryAdd( tId, Task.CompletedTask ) )
 				{
-					Id = tempCurrent.PullRequestId,
-					tempCurrent.Status,
-					tempCurrent.PreparedSha
-				} );
+					return Conflict( new
+					{
+						Error = "Worker operation is still running"
+					} );
+				}
 			}
 			finally
 			{
 				tGate.Mutex.Release();
+			}
+
+			try
+			{
+				WorkerSnapshot tempSnapshot = await tWorkers.SnapshotAsync( tempRequest.Worker, tempRequest, tCancel );
+
+				await tGate.Mutex.WaitAsync( tCancel );
+
+				try
+				{
+					PullRequest? tempCurrent = await tContext.PullRequest.FindAsync( [ tId ], tCancel );
+
+					if ( tempCurrent is null || tempCurrent.WorkerId != tempRequest.WorkerId || tempCurrent.ApprovedSha is not null || tempCurrent.Status is not ( PullRequestStatus.Processing or PullRequestStatus.ReadyForApproval ) )
+					{
+						return Conflict( new
+						{
+							Error = "Session or approval changed during snapshot"
+						} );
+					}
+
+					tempCurrent.PreparedSha = tempSnapshot.TreeSha;
+					tempCurrent.SessionId = tempSnapshot.SessionId ?? tempCurrent.SessionId;
+					tempCurrent.Status = PullRequestStatus.ReadyForApproval;
+					tempCurrent.LastError = null;
+					await tContext.SaveChangesAsync( tCancel );
+
+					return Ok( new
+					{
+						Id = tempCurrent.PullRequestId,
+						tempCurrent.Status,
+						tempCurrent.PreparedSha
+					} );
+				}
+				finally
+				{
+					tGate.Mutex.Release();
+				}
+			}
+			catch ( Exception tException ) when ( !tCancel.IsCancellationRequested )
+			{
+				return Conflict( new
+				{
+					Error = tException.Message
+				} );
+			}
+			finally
+			{
+				tGate.Running.TryRemove( tId, out _ );
 			}
 		}
 
@@ -236,7 +275,7 @@ namespace CPR.Controller
 					return NotFound();
 				}
 
-				if ( tempRequest.Status != PullRequestStatus.ReadyForApproval || tempRequest.WorkerId is null || tempRequest.PreparedSha is null || tempRequest.ApprovedSha is not null )
+				if ( tempRequest.Status != PullRequestStatus.ReadyForApproval || tempRequest.WorkerId is null || tempRequest.PreparedSha is null || tempRequest.ApprovedSha is not null || tGate.Running.ContainsKey( tId ) )
 				{
 					return Conflict( new
 					{

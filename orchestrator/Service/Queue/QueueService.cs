@@ -7,7 +7,6 @@ namespace CPR.Service.Queue
 	public sealed class QueueService( IServiceScopeFactory tScopes, QueueGate tGate, GitHubClient tGitHub, WorkerClient tWorkers, GitPublisher tPublisher, IOptions<Settings> tSettings, ILogger<QueueService> tLogger ) : BackgroundService
 	{
 		private readonly Settings _settings = tSettings.Value;
-		private readonly ConcurrentDictionary<long, Task> _running = new();
 
 		protected override async Task ExecuteAsync( CancellationToken tCancel )
 		{
@@ -230,6 +229,7 @@ namespace CPR.Service.Queue
 					tempRequest.Status = PullRequestStatus.Processing;
 					tempRequest.PreparedSha = null;
 					tempRequest.ApprovedSha = null;
+					tempRequest.SessionId = null;
 					tempRequest.LastError = null;
 				}
 
@@ -241,8 +241,8 @@ namespace CPR.Service.Queue
 					int tempWorkerId = tempWorker.WorkerId;
 					Task tempTask = Task.Run( () => ProcessJobAsync( tempId, tempWorkerId, tCancel ), CancellationToken.None );
 
-					_running[ tempId ] = tempTask;
-					_ = tempTask.ContinueWith( x => { _running.TryRemove( tempId, out _ ); }, TaskScheduler.Default );
+					tGate.Running[ tempId ] = tempTask;
+					_ = tempTask.ContinueWith( x => { tGate.Running.TryRemove( tempId, out _ ); }, TaskScheduler.Default );
 				}
 			}
 			finally
@@ -263,12 +263,12 @@ namespace CPR.Service.Queue
 
 			foreach ( long tempId in tempApprovals )
 			{
-				if ( _running.TryAdd( tempId, Task.CompletedTask ) )
+				if ( tGate.Running.TryAdd( tempId, Task.CompletedTask ) )
 				{
 					Task tempTask = Task.Run( () => PublishJobAsync( tempId, tCancel ), CancellationToken.None );
 
-					_running[ tempId ] = tempTask;
-					_ = tempTask.ContinueWith( x => { _running.TryRemove( tempId, out _ ); }, TaskScheduler.Default );
+					tGate.Running[ tempId ] = tempTask;
+					_ = tempTask.ContinueWith( x => { tGate.Running.TryRemove( tempId, out _ ); }, TaskScheduler.Default );
 				}
 			}
 		}
