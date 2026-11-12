@@ -1,3 +1,5 @@
+using CPR.Service.Review;
+
 namespace CPR.Service
 {
 	public sealed record Settings
@@ -9,5 +11,7 @@ namespace CPR.Service
 		public string GitAuthorName { get; set; } = "";
 		public string GitAuthorEmail { get; set; } = "";
 		public string GitStoragePath { get; set; } = "/data/git";
+		public Dictionary<PromptKind, string> Prompts { get; set; } = [];
+		public ReviewStepSettings[] ReviewSteps { get; set; } = [];
 	}
 }

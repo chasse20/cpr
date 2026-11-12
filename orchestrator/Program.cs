@@ -2,6 +2,7 @@ using CPR.Service;
 using CPR.Service.Command;
 using CPR.Service.GitHub;
 using CPR.Service.Queue;
+using CPR.Service.Review;
 using CPR.Service.SSH;
 using CPR.SQL;
 
@@ -14,6 +15,7 @@ tempBuilder.Configuration.AddCommandLine( args );
 tempBuilder.Services.Configure<Settings>( tempBuilder.Configuration.GetSection( "CPR" ) );
 
 Settings tempSettings = tempBuilder.Configuration.GetSection( "CPR" ).Get<Settings>() ?? new();
+ReviewService.ValidateSettings( tempSettings );
 
 if ( tempSettings.IsWorkerExecutionEnabled && ( string.IsNullOrWhiteSpace( tempSettings.GitAuthorName ) || string.IsNullOrWhiteSpace( tempSettings.GitAuthorEmail ) ) )
 {
@@ -32,7 +34,7 @@ tempBuilder.Services.AddDbContextPool<Context>
 	{
 		string tempConnection = tempBuilder.Configuration.GetConnectionString( "CPR" ) ?? throw new InvalidOperationException( "Set ConnectionStrings:CPR in appsettings.Private.json or ConnectionStrings__CPR in the environment" );
 
-		tOptions.UseSqlServer
+		tOptions.UseNpgsql
 		(
 			tempConnection,
 			tProviderOptions =>
@@ -50,6 +52,9 @@ tempBuilder.Services.AddSingleton<ExternalCommand>();
 tempBuilder.Services.AddSingleton<GitHubClient>();
 tempBuilder.Services.AddSingleton<WorkerClient>();
 tempBuilder.Services.AddSingleton<GitPublisher>();
+tempBuilder.Services.AddSingleton<CleanupService>();
+tempBuilder.Services.AddSingleton<ReviewHistoryService>();
+tempBuilder.Services.AddScoped<ReviewService>();
 tempBuilder.Services.AddHostedService<QueueService>();
 
 tempBuilder.Services.AddControllers().AddJsonOptions( x => x.JsonSerializerOptions.Converters.Add( new JsonStringEnumConverter() ) );

@@ -1,6 +1,6 @@
 namespace CPR.SQL
 {
-	[Table( "Worker", Schema = "dbo" )]
+	[Table( "Worker", Schema = "cpr" )]
 	[Index( nameof( SshHost ), IsUnique = true )]
 	public sealed class Worker
 	{

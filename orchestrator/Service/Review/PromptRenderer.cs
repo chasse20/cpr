@@ -1,6 +1,6 @@
 using CPR.SQL;
 
-namespace CPR.Service.Queue
+namespace CPR.Service.Review
 {
 	public static class PromptRenderer
 	{

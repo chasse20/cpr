@@ -8,6 +8,10 @@ namespace CPR.SQL
 		WaitingForCi,
 		CiFailure,
 		WaitingForMergeTurn,
-		ReadyToBeMerged
+		ReadyToBeMerged,
+		Merged,
+		Closed,
+		Blocked,
+		Removed
 	}
 }

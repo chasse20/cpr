@@ -5,7 +5,7 @@ name: cpr
 
 x-settings:
   orchestrator-image: &orchestrator-image cpr:latest
-  database: &database 'Server=YOUR_SQL_SERVER,1433;Database=CPR;User Id=cpr_app;Password=REPLACE_ME;Encrypt=True;TrustServerCertificate=False'
+  database: &database 'Host=YOUR_POSTGRES_HOST;Port=5432;Database=YOUR_DATABASE;Username=cpr_app;Password=REPLACE_ME;SSL Mode=VerifyFull'
   github-token: &github-token 'REPLACE_WITH_SCOPED_GITHUB_TOKEN'
   git-name: &git-name 'Your Name'
   git-email: &git-email 'your-github-verified-email@example.com'
@@ -23,7 +23,7 @@ x-worker: &worker
   restart: unless-stopped
   init: true
   read_only: true
-  working_dir: /workspace/repo
+  working_dir: /workspace
   stdin_open: true
   tty: true
   cap_drop: [ALL]
@@ -85,8 +85,9 @@ services:
         for id in {101..109}; do
           workspace="/data/workspaces/$$id"
           state="/data/state/$$id"
-          mkdir -p "$$workspace/repo" "$$workspace/archive" "$$state/home/coder/.codex" \
+          mkdir -p "$$workspace/jobs" "$$workspace/archive" "$$state/home/coder/.codex" \
             "$$state/ssh" "$$state/cpr/jobs" "$$state/cargo"
+          chown 1000:1000 "$$workspace/jobs" "$$workspace/archive"
           for directory in "$$workspace" "$$state"; do
             if [[ $$(stat -c '%u:%g' "$$directory") != 1000:1000 ]]; then
               chown -R 1000:1000 "$$directory"
@@ -318,6 +319,6 @@ configs:
       - Follow the orchestrator's prompt and any repository-local review guidelines.
       - Make and test changes in `/workspace/repo`.
       - Do not create Git commits or push to any Git remote before explicit CPR approval.
-      - Do not edit CPR job state under `/state`. Write the review report to the `/tmp/cpr-review-ID.md` path specified in the prompt, outside the Git checkout.
+      - Do not edit CPR job state under `/state`. Retain review evidence outside the checkout at the path supplied by the orchestrator. Return its requested structured result; CPR writes the report.
       - Do not change unrelated files, credentials, SSH configuration, or the orchestrator.
       - If missing logs or context prevent a reliable fix, describe the blocker instead of guessing.

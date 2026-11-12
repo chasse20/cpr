@@ -5,14 +5,28 @@ namespace CPR.Service.Queue
 {
 	public static class WorkflowRules
 	{
+		public static bool IsSameSource( PullRequest tRequest, GitHubPullRequest tRemote )
+		{
+			return tRemote.State == "OPEN" && tRequest.RemoteSha == tRemote.HeadSha && tRequest.TargetBranch == tRemote.TargetBranch && tRequest.HeadBranch == tRemote.HeadBranch && string.Equals( tRequest.HeadRepository, tRemote.HeadRepository, StringComparison.OrdinalIgnoreCase );
+		}
+
+		public static void Block( PullRequest tRequest, string tReason )
+		{
+			tRequest.Status = PullRequestStatus.Blocked;
+			tRequest.PreparedSha = null;
+			tRequest.ApprovedSha = null;
+			tRequest.ReviewedTargetSha = null;
+			tRequest.LastError = tReason[ ..Math.Min( 4000, tReason.Length ) ];
+		}
+
 		public static WorkflowDecision Decide( PullRequest tRequest, bool tIsFront, GitHubPullRequest tRemote, CIResult tChecks )
 		{
-			if ( tRequest.Status is not ( PullRequestStatus.WaitingForCi or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged ) )
+			if ( tRequest.Status is not ( PullRequestStatus.WaitingForCi or PullRequestStatus.CiFailure or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged ) )
 			{
 				return new( tRequest.Status, tRequest.WorkReason );
 			}
 
-			// CI failures require an explicit interactive recovery request
+			// Poll reruns on the published commit; code repair remains an explicit request
 			if ( tChecks == CIResult.Failed )
 			{
 				return new( PullRequestStatus.CiFailure, tRequest.WorkReason );

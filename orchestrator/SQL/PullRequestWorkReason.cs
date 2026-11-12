@@ -4,6 +4,8 @@ namespace CPR.SQL
 	{
 		InitialReview,
 		MergeConflict,
-		CiRecovery
+		CiRecovery,
+		Interactive,
+		Rereview
 	}
 }

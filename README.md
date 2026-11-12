@@ -1,15 +1,16 @@
 # CPR
 
-This is a personal project for managing GitHub pull requests through Codex workers on a Linux server. A Bash client submits one PR at a time, opens worker sessions, and approves the resulting changes. An ASP.NET Core service coordinates the queue and keeps its state in SQL Server.
+This is a personal project for managing GitHub pull requests through Codex workers on a Linux server. A Bash client submits one PR at a time, opens worker sessions, and approves the resulting changes. An ASP.NET Core service coordinates the queue and keeps its state in PostgreSQL.
 
-Work advances independently for each repository and target branch. Each assigned worker keeps its checkout through review and publication, so the same work can be picked up again from the client. Changes require explicit approval before they are pushed; merging remains a separate action in GitHub.
+Work advances independently for each repository and target branch. Each PR keeps its own checkout and saved Codex session. A completed review releases its worker while awaiting approval, so that worker can process other PRs. Changes require explicit approval before they are pushed; merging remains a separate action in GitHub.
 
-- ASP.NET Core and EF Core SQL Server for queue and worker state
-- Bash client with seven commands and one config file
+- ASP.NET Core and EF Core with Npgsql for queue and worker state
+- Bash client with one config file
 - persistent Git checkouts and Codex sessions on Linux workers
 - SSH access for interactive work and local checkout copies
 - approval tied to the exact prepared Git tree
 - GitHub CI monitoring with interactive recovery for failed checks
+- retained `Merged` and `Closed` records with automatic PR file cleanup
 - Docker Compose for worker startup, SSH identities, and Git configuration
 - GPU assignment per worker, without a fixed GPU count
 
@@ -19,26 +20,29 @@ Work advances independently for each repository and target branch. Each assigned
 flowchart TD
     Add["cpr add PR URL<br/>Assign permanent CPR ID and merge lane"]
     Queue["WaitingToBeProcessed"]
-    Work["Processing<br/>Codex reviews, repairs, tests"]
-    Approve["ReadyForApproval<br/>Worker and Codex session retained"]
-    Push["cpr approve ID<br/>Commit and push approved revision<br/>Release worker"]
+    Work["Processing<br/>Check relevance, review, repair, validate"]
+    Approve["ReadyForApproval<br/>Workspace and session saved<br/>Worker released"]
+    Push["cpr approve ID<br/>Reserve workspace's worker when available<br/>Push approved revision and release worker"]
     CI["WaitingForCi<br/>Poll GitHub"]
-    Fail["CiFailure<br/>Await your input"]
+    Fail["CiFailure<br/>Poll reruns; repairs by request"]
     CiRetry["WaitingToBeProcessed<br/>WorkReason: CiRecovery"]
     Turn["WaitingForMergeTurn<br/>CI passed; preserve queue order"]
     Check{"Front of repository + target branch lane:<br/>Conflict / base update needed?"}
     Conflict["WaitingToBeProcessed<br/>WorkReason: MergeConflict"]
     Ready["ReadyToBeMerged"]
-    Closed["You merge or close PR on GitHub<br/>Remove from active tracking"]
+    Closed["GitHub reports Merged or Closed<br/>Retain DB record; leave active queue"]
+    Cleanup["Automatically clean PR files<br/>Retry busy or unavailable workers"]
+    Cleaned["Record CleanedAt<br/>Keep PR history in DB"]
     Next["Reevaluate next PR in same lane"]
 
     Add --> Queue
     Queue -->|Worker available| Work
     Work --> Approve
-    Approve -->|cpr connect: request changes| Work
+    Approve -->|cpr connect: reserve worker for edits| Work
     Approve -->|Explicit approval| Push
     Push --> CI
     CI -->|CI fails| Fail
+    Fail -->|Rerun passes on published commit| Turn
     Fail -->|cpr connect ID + supply logs/context| CiRetry
     CiRetry -->|Worker available| Work
     CI -->|CI passes| Turn
@@ -49,18 +53,38 @@ flowchart TD
     Check -->|Checks must rerun| CI
     Ready -->|Manual action in GitHub| Closed
     Closed --> Next
+    Closed --> Cleanup
+    Cleanup --> Cleaned
     Next -.->|When next PR is CI-passed| Turn
 ```
 
-`cpr add` queues one pull request. The orchestrator assigns a worker and prepares it for review. `cpr connect` opens Codex on that worker and snapshots edits when the session exits successfully. `cpr approve` authorizes publication of the prepared changes. Failed CI requires interactive recovery through `cpr connect`. Failed or interrupted reviews can also be reopened with `cpr connect`; a worker accepts only one active operation at a time.
+`cpr add` queues one pull request. The orchestrator assigns a worker and prepares it for review. Successful validation saves the exact Git tree and releases the active worker assignment. `cpr connect` requests a worker for interactive edits; if it is busy, run the command again once assigned. Exiting Codex successfully runs final validation and releases the worker again. `cpr approve` authorizes publication of the prepared changes and queues a brief reservation of the worker holding that workspace. Publication, interactive requests, and explicit rereviews take priority over new reviews when their worker becomes available.
+
+`cpr review ID` requests another AI review, including after approval or publication. It clears pending approval, fetches the latest comments when the worker starts, and explicitly reassesses new or unresolved feedback. Saved unpublished work stays on its workspace worker, and the review resumes its Codex session when available. After publication, a new checkout uses the current PR head. Successful rereview returns to `ReadyForApproval` and releases the worker; publishing requires another `cpr approve ID`. New comments alone do not trigger a review.
+
+`cpr remove ID` stops tracking and records `Removed`, preserving the saved work and database history. Removed PRs leave merge ordering and GitHub polling. `cpr add URL` or `cpr review ID` resumes tracking under the same CPR ID. `cpr purge ID` stops tracking and explicitly requests deletion of all PR files, including unpublished edits; the database record and compact review history remain. Purge also retries cleanup for completed records.
+
+When GitHub reports a merge or closure, CPR records `Merged` or `Closed` with `CompletedAt` and immediately excludes that PR from merge ordering and new work. The database record remains. `cpr status` includes these terminal records and shows file cleanup as `Pending` or `Done`. Terminal records cannot be removed, reviewed, approved, or connected to through the client. If a closed PR is reopened on GitHub, `cpr add URL` queues it again under its existing CPR ID after cleanup finishes.
+
+Cleanup runs automatically when worker execution is enabled. Merged and closed PRs retain only database history: CPR deletes their checkouts, build outputs, archived checkouts, CPR job state, raw review evidence, scratch directories, and orchestrator publishing repository. `StorageWorkerIds` records workers that still hold files; each successful deletion removes that worker from the list. Shared tool caches, Codex account/runtime data, SSH configuration, and other PRs remain. Compact results, checks, findings, limitations, tree hashes, and usage are saved in `ReviewRun` before the files are deleted.
+
+Active operations finish before cleanup starts. Worker filesystem locks also protect open interactive sessions. A worker is released as soon as its copy is cleaned, even if cleanup remains pending elsewhere. Busy, offline, or paused workers and failed deletions are retried; already cleaned workers are not contacted again. `CleanupRequestedAt` records the request and `CleanedAt` is set after every recorded copy and orchestrator storage are deleted. `LastError` explains pending work. Neither merge nor closure pauses the worker. Records deleted by older CPR versions cannot be cleaned automatically because their identities are no longer tracked.
+
+`remove`, `review`, and `purge` reject an automated operation already running on that PR. `cpr cancel ID` stops the selected automated review, revokes approval, preserves edits, and records `Blocked`; it never interrupts publication or kills an interactive session. Exit an interactive session before releasing its worker. Cancellation targets the registered review process group, with an operation identifier and process identity check. If cancellation cannot be confirmed, the worker stays reserved until it is idle. Pending approval is cleared before attempts to release work. Rereview archives a saved checkout when the upstream revision changed and tells the reviewer to recover any still-relevant repairs from it.
+
+Failed CI continues polling against the commit CPR published, so a rerun can recover without another review. `cpr connect` or `cpr review` explicitly requests code repair. A changed PR head, destination branch, or reviewed target revision invalidates approval and records `Blocked`. Freshness is checked at review completion, approval, and immediately before publication. Failed, blocked, cancelled, and interrupted automated reviews release their worker once its filesystem lock is free; their checkout remains available for `review`, `connect`, or `checkout`. Startup marks interrupted work blocked instead of leaving it permanently `Processing`.
+
+Use `cpr workers` to find a worker's ID, then `cpr pause 101` to stop new assignments while you perform maintenance. Existing work continues; wait for its assignment to clear before stopping the worker. Paused workers also skip health checks and new cleanup operations. `cpr resume 101` sets the worker back to `Online`, allowing scheduling and health checks again. Pause persists until you explicitly resume it.
 
 ## Orchestrator
 
 `orchestrator/` contains the .NET application. `Program.cs` hosts ASP.NET Core, `Controller/` exposes the HTTP API, and `Service/` groups queue processing, GitHub operations, SSH, and command execution.
 
-`SQL/` contains the EF Core context, entities, and enums. The schema is created manually with [Create.sql](orchestrator/Create.sql), which creates the `CPR` database, tables, indexes, nine example workers, and two prompts. The application does not run migrations or modify its schema at startup. Only the orchestrator receives the database connection.
+`SQL/` contains the EF Core context, entities, and persistence enums. [Create.sql](orchestrator/Create.sql) creates the `cpr` schema in your existing PostgreSQL database, its three tables (`Worker`, `PullRequest`, `ReviewRun`), indexes, and nine example workers. It also creates the `cpr_app` login and grants runtime access to those tables. `PullRequest.CompletedAt` records GitHub's merge or closure time (falling back to the time CPR observes it); `CleanedAt` records successful file cleanup. The application does not run migrations or create schema. Only the orchestrator receives the database connection. Review prompts live in application configuration.
 
-`GitStoragePath` is the orchestrator's staging directory for bare Git repositories. It fetches approved worker commits there, checks their contents, and pushes them to GitHub. The container uses `/data/git`; worker checkouts live separately under `/workspace/repo`.
+`GitStoragePath` is the orchestrator's staging directory for bare Git repositories. It fetches approved worker commits there, checks their contents, and pushes them to GitHub. The container uses `/data/git`; each PR's checkout lives at `/workspace/jobs/ID/repo` on its workspace worker. `/workspace/repo` points to the currently selected checkout.
+
+`PullRequest.WorkerId` records an active reservation; `WorkspaceWorkerId` records where unpublished work is saved. While awaiting your approval, `WorkerId` is null and the workspace remains intact, including its index, uncommitted merge, build outputs, and Codex session. Approval and interactive editing use the same workspace worker, waiting if it is busy or offline. `cpr checkout` copies the saved PR directory without reserving a worker. Workspaces are not transferred between workers.
 
 Run one orchestrator instance. Public GitHub PR checkouts are supported; private repository fetching and publication to contributor forks are not implemented.
 
@@ -69,22 +93,36 @@ Run one orchestrator instance. Public GitHub PR checkouts are supported; private
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | API health |
-| `GET /health/db` | SQL Server connectivity |
-| `GET /api/status` | Pull request queue |
+| `GET /health/db` | PostgreSQL connectivity |
+| `GET /api/status` | Pull requests, terminal history, and cleanup timestamps |
+| `GET /api/pr/{id}` | Review summaries, findings, checks, usage, and next action |
+| `POST /api/pr/{id}/cancel` | Stop review work, preserve edits, and release its worker when idle |
+| `POST /api/pr/{id}/purge` | Delete PR files, including edits; retain database history |
 | `POST /api/pr` | Add one PR with `{ "url": "..." }` |
+| `DELETE /api/pr/{id}` | Stop tracking; retain a Removed record and saved work |
+| `POST /api/pr/{id}/review` | Queue a rereview with fresh comments and invalidate approval |
 | `GET /api/worker` | Worker status and assignments |
 | `PUT /api/worker/{id}/status` | Set worker status with `{ "status": "Paused" }` |
-| `GET /api/pr/{id}/connection` | Worker SSH connection metadata |
+| `GET /api/pr/{id}/connection` | Saved checkout's SSH host and PR directory |
 | `POST /api/pr/{id}/connect` | Request an interactive session or CI recovery |
-| `POST /api/pr/{id}/complete` | Snapshot edits after Codex exits |
+| `POST /api/pr/{id}/complete` | Validate interactive edits and snapshot the validated tree |
 | `POST /api/pr/{id}/approve` | Approve the prepared changes |
-| `GET /api/prompt` | Stored prompts |
-| `GET /api/prompt/{kind}` | One prompt |
-| `PUT /api/prompt/{kind}` | Update a prompt with `{ "content": "..." }` |
 
-Prompt kinds are `InitialReview` and `MergeConflict`. Templates support `{{PullRequestUrl}}`, `{{Repository}}`, `{{TargetBranch}}`, `{{Number}}`, and `{{CprId}}`. CI recovery takes its instructions from the interactive session.
+### Review configuration
 
-Both seeded prompts follow applicable `AGENTS.md`, `CODE_STYLE.md`, and `docs/helpful-pr-review-guidelines.md`. The merge prompt also reviews the resolved result. Reports are written outside the checkout and retained under `/state/cpr/jobs/ID/report.md` on the worker.
+Git preparation and target integration run in the worker script. The orchestrator captures the PR description, paginated discussion and reviews, closing issues and their comments, and up to 50 recently updated PRs targeting the same branch. The reviewer checks whether the proposed change is still needed and inspects related PRs for duplication, overlap, or superseding work before making repairs. The candidate list is bounded, not an exhaustive search; the reviewer must record its scope and investigate further when necessary. An obsolete PR or unresolved relevance decision stops the job for inspection without automatically closing anything on GitHub.
+
+`CPR:Prompts` in [appsettings.json](orchestrator/appsettings.json) holds the ten named prompt strings: `InitialReview`, `MergeConflict`, `Rereview`, `SharedReview`, `Correctness`, `Resources`, `Cleanup`, `Evidence`, `FinalValidation`, and `Relevance`. They incorporate the personal review standards directly, including memory lifetime analysis and targeted measurements. A separate `helpful-pr-review-guidelines.md` is unnecessary. Applicable repository `AGENTS.md` and `CODE_STYLE.md` still apply. Templates support `{{PullRequestUrl}}`, `{{Repository}}`, `{{TargetBranch}}`, `{{Number}}`, and `{{CprId}}`. Startup rejects missing, blank, or oversized prompts. Prompts are configured as complete strings, with `\n` representing line breaks.
+
+`CPR:ReviewSteps` in [appsettings.json](orchestrator/appsettings.json) controls the enabled steps in order. Each has `Name`, `Model`, `ReasoningEffort`, `TimeoutSeconds`, `MaxAttempts`, `Prompts`, and optional `IsEnabled` (default `true`). Model and effort names must be supported by the installed Codex CLI and account; unsupported settings fail visibly. There is no silent model fallback.
+
+The default is a review with GPT-6 Sol high followed by final validation with Astra xHigh in the same Codex session. This reduces the initial review's model cost while retaining the deeper follow-up from the observed Astra-only workflow. It is a starting configuration to evaluate: the nine historical reviews did not compare cheaper models, and total cost depends on actual token usage, caching, and retries. Models and effort can differ by step; there is no automatic risk-based model selection or escalation. A separate relevance-only first step can use `Prompts: ["Relevance"]`; another step must remain for the full review. The final enabled step always receives correctness, resources, cleanup, and final-validation requirements. Shared instructions, relevance, and evidence requirements accompany every step.
+
+Settings can be overridden in private JSON or Compose environment variables, for example `CPR__ReviewSteps__0__Model` or `CPR__Prompts__Resources`. A prompt override replaces that entire string while other named prompts retain their defaults. Restart the orchestrator after configuration changes. .NET configuration merges arrays by index: supplying a shorter array does not remove later defaults. Set `CPR__ReviewSteps__1__IsEnabled=false` for a single combined review and validation, and replace all existing prompt indices when changing a step's assignment. Disable unwanted steps explicitly. Routing and review policy are both configured here; there is no prompt-editing HTTP API.
+
+Each step has a time limit and a bounded number of attempts. A coherent but incomplete result receives a continuation focused on its missing evidence; process failures, blockers, and unresolved relevance stop without repeatedly spending the remaining attempts. Completion requires structured coverage, consistent check results, retained evidence files, required resource measurements, and a final diff check. This gate checks the evidence contract, not the truth of every model judgment. The snapshot must match the tree validated by the final attempt. Interactive completion runs the last enabled step and uses a longer client timeout derived from that step's budget.
+
+Full review files live under `/state/cpr/jobs/ID/runs/RUN/` on the worker until merge, closure, or explicit purge. Each run retains the plan, captured context, prompts, Codex events, stderr, evidence, structured results, hashes, usage, and final patch when successful. Each attempt has its own directory. `cpr show ID` reads the compact history in PostgreSQL, including results, checks, findings, limitations, diff statistics, models, effort, and token usage. It works after file cleanup; raw evidence and patches are deleted. Input usage includes cached input tokens; no fixed prices are assumed. Export any raw evidence needed later before merging, closing, or purging.
 
 ## Workers
 
@@ -92,7 +130,7 @@ Both seeded prompts follow applicable `AGENTS.md`, `CODE_STYLE.md`, and `docs/he
 
 The example has nine workers: 101–103 use GPU `0`, 104–106 use GPU `1`, and 107–109 use GPU `2`. Each worker defines its own `device_ids`; GPU indices and UUIDs are supported. Change these assignments to match the machine, or remove a worker's `deploy` block to run it without a GPU.
 
-Compose creates the SSH identities, worker Git configuration, and persistent directories under `data/`. Checkouts, Codex state, and SSH identities survive container restarts. Back up `data/` and the SQL Server database when moving the deployment.
+Compose creates the SSH identities, worker Git configuration, and persistent directories under `data/`. Checkouts, Codex state, and SSH identities survive container restarts. Back up `data/` and the PostgreSQL database when moving the deployment.
 
 Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces inside Docker. Codex runs with `workspace-write`; the worker root filesystem remains read-only, and GitHub publication credentials stay in the orchestrator.
 
@@ -103,20 +141,27 @@ Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces insi
 | Command | Purpose |
 |---|---|
 | `cpr help` | List the commands |
-| `cpr status` | Show the pull request queue and CPR IDs |
+| `cpr status` | Show PRs, terminal history, CPR IDs, and cleanup status |
+| `cpr show ID` | Inspect review results, checks, usage, and the next action |
+| `cpr cancel ID` | Stop a review and preserve edits |
+| `cpr purge ID` | Stop tracking and delete PR files; retain database history |
 | `cpr workers` | Show worker status and assignments |
+| `cpr pause WORKER_ID` | Pause new assignments while current work continues |
+| `cpr resume WORKER_ID` | Make a paused worker available again |
 | `cpr add https://github.com/OWNER/REPO/pull/123` | Queue one pull request |
-| `cpr checkout ID` | Copy the assigned worker checkout locally |
-| `cpr connect ID` | Open Codex on the assigned worker |
+| `cpr remove ID` | Untrack a PR and preserve saved work |
+| `cpr review ID` | Reassess the latest comments and require fresh approval |
+| `cpr checkout ID` | Copy the saved PR checkout locally |
+| `cpr connect ID` | Reserve its workspace worker and open Codex |
 | `cpr approve ID` | Approve the prepared changes for publication |
 
-These are the only seven commands. Use the CPR ID from `status` for `checkout`, `connect`, and `approve`.
+Use the CPR ID from `status` for commands that take `ID`. Worker commands use the ID from `workers`.
 
 ## Setup
 
 ### Server
 
-The server needs Docker with Compose 2.23.1 or later. GPU workers also need NVIDIA Container Toolkit. The orchestrator uses an existing SQL Server instance; the server host does not need .NET installed.
+The server needs Docker with Compose 2.23.1 or later. GPU workers also need NVIDIA Container Toolkit. The orchestrator uses an existing PostgreSQL database; the server host does not need .NET installed.
 
 From the local checkout, set `tempRegistry` in [PushToDocker.sh](orchestrator/PushToDocker.sh), then build and push the orchestrator image:
 
@@ -124,11 +169,27 @@ From the local checkout, set `tempRegistry` in [PushToDocker.sh](orchestrator/Pu
 ./orchestrator/PushToDocker.sh
 ```
 
-Run [Create.sql](orchestrator/Create.sql) once against SQL Server before starting the orchestrator. Use SSMS or run the following from the repository root; `sqlcmd` prompts for the password:
+Run [Create.sql](orchestrator/Create.sql) in the destination database as its administrator before starting the orchestrator. The administrator must be able to create roles and own the CPR schema and tables. From the repository root, replace the host, database, and administrator username (`postgres` below):
 
 ```sh
-sqlcmd -S YOUR_SQL_SERVER -U sa -b -i orchestrator/Create.sql
+psql -X -h YOUR_POSTGRES_HOST -p 5432 -U postgres -d YOUR_DATABASE \
+  -v ON_ERROR_STOP=1 -f orchestrator/Create.sql -c '\password cpr_app'
 ```
+
+The script creates `cpr_app` without a password; the final `psql` command prompts for one. Store that password in the orchestrator's private connection string. Existing role passwords are preserved when re-running the SQL. The login can read and update workers, and read, insert, update, and delete queue entries; it does not own the schema or tables. Entity mappings explicitly use `cpr`, so no connection-string search path is required.
+
+The same script can be re-run without migrations. It preserves records and workers, adds the new PR columns and `ReviewRun`, and updates runtime grants. Status values remain compatible: `Merged = 7`, `Closed = 8`, `Blocked = 9`, `Removed = 10`. Stop the orchestrator after active work finishes before applying SQL and deploying. The one-time storage backfill conservatively includes every configured worker for older uncleared PRs; subsequent runs preserve cleanup progress. Older approvals without a pinned target revision require a fresh review. Existing worker `AGENTS.md` files are preserved by Compose; reconcile their report instructions with `worker-instructions` if needed.
+
+Existing installations may still have `cpr."Prompt"`; CPR no longer reads it. Copy any customized database prompt text to the matching `CPR:Prompts` settings before deploying. After switching to the new version, the obsolete table can be removed manually with `DROP TABLE IF EXISTS cpr."Prompt";`. `Create.sql` leaves it intact.
+
+Confirm the application login can read the workers:
+
+```sh
+psql -X -h YOUR_POSTGRES_HOST -p 5432 -U cpr_app -d YOUR_DATABASE \
+  -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM cpr."Worker";'
+```
+
+For remote TLS connections, the Compose example uses `SSL Mode=VerifyFull`; configure the PostgreSQL hostname and trusted CA certificate to match your server.
 
 Copy `server/compose.yaml` and `server/Dockerfile` to a directory such as `~/cpr` on the server. An orchestrator source checkout is not needed there. Edit `x-settings` in `compose.yaml` with the published image reference, database connection, GitHub token, Git name/email, and desktop SSH public key. Keep the configured copy private, and write literal dollar signs as `$$` in Compose values.
 
@@ -163,7 +224,7 @@ CPR_CHECKOUT_DIR=~/.local/share/cpr/checkouts
 CPR_HTTP_TIMEOUT=120
 ```
 
-These settings control the API address, local checkout directory, and HTTP timeout in seconds. Use plain `KEY=value` lines without quotes or shell expressions. This file is the client's only configuration source; there are no command-line or environment-variable overrides.
+These settings control the API address, local checkout directory, and ordinary HTTP timeout in seconds. Final validation after `connect` uses the server's review budget instead. Use plain `KEY=value` lines without quotes or shell expressions. This file is the client's only configuration source; there are no command-line or environment-variable overrides.
 
 ### SSH
 
@@ -247,7 +308,7 @@ Create or edit `orchestrator/appsettings.Private.json` alongside `Program.cs`:
 ```json
 {
   "ConnectionStrings": {
-    "CPR": "Server=127.0.0.1,1433;Database=CPR;User Id=sa;Password=CHANGE_ME;Encrypt=True;TrustServerCertificate=True;"
+    "CPR": "Host=127.0.0.1;Port=5432;Database=db;Username=cpr_app;Password=REPLACE_ME"
   },
   "GH_TOKEN": "YOUR_GITHUB_TOKEN",
   "CPR": {
@@ -258,7 +319,7 @@ Create or edit `orchestrator/appsettings.Private.json` alongside `Program.cs`:
 }
 ```
 
-Use a database dedicated to CPR and run `orchestrator/Create.sql` before the first start. `TrustServerCertificate=True` in this example is for local development with a self-signed SQL Server certificate.
+Run `orchestrator/Create.sql` in the selected PostgreSQL database and set the `cpr_app` password using the server setup instructions above. CPR stores its tables in the `cpr` schema, so the database can also contain other applications' schemas. Replace the connection string's host, database, and password with your settings.
 
 `appsettings.json` holds shared defaults. `appsettings.Private.json` holds local overrides and is excluded from Git, publishing, and Docker builds. Environment variables override both JSON files, and command-line settings take precedence over those.
 

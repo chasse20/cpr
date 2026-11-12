@@ -80,8 +80,13 @@ Parallel.For
 
 - Match namespaces to folders and files to their main types.
 - `Program.cs` hosts ASP.NET Core and configures services; HTTP routes belong in `Controller/`.
-- Keep EF Core SQL Server entities, enums and `Context` in `SQL/`. Maintain the database schema manually in `orchestrator/Create.sql`; do not add EF migrations or automatic schema creation.
-- Use entity-prefixed SQL keys such as `PullRequestId`, `WorkerId` and `PromptId`. Configure EF mapping with entity annotations and conventions; keep `Context` free of `OnModelCreating`.
+- Keep EF Core PostgreSQL entities, enums and `Context` in `SQL/`. Use the `cpr` schema and maintain it manually in `orchestrator/Create.sql`, including seed data and application-role grants; do not add EF migrations or automatic schema creation.
+- Use entity-prefixed SQL keys such as `PullRequestId` and `WorkerId`. Configure EF mapping with entity annotations and conventions; keep `Context` free of `OnModelCreating`.
+- Keep review prompts and step settings in application configuration. Validate them at startup; keep prompt types and rendering in `Service/Review`.
+- Keep workspace ownership separate from active worker assignments. Preserve the validated workspace and release its worker while awaiting approval; reserve it again for editing or publication.
+- Serialize queue changes with worker scheduling and publication. Rereview invalidates approval; removing tracking preserves work and never closes the GitHub PR.
+- Retain `Merged`, `Closed`, and `Removed` records outside active merge ordering. Merged and closed PRs retain only database history; automatically delete their files under worker locks. Removed PRs preserve files until explicit purge. Track remaining copies per worker and record completion after every recorded copy and orchestrator storage is deleted.
+- Persist compact review results and usage before deleting files. Block stale or interrupted reviews, revoke stale approvals, and release idle workers without discarding unpublished work.
 - Group `Service/` by responsibility. Keep service records with the services that use them and request records with their controllers.
 - Remove unused parameters and obsolete configuration properties together with their arguments and settings.
 - Use structured logging templates and preserve cancellation and resource lifetimes.

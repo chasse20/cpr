@@ -1,0 +1,84 @@
+{
+	"type": "object",
+	"additionalProperties": false,
+	"required": ["outcome", "summary", "relevance", "coverage", "is_resource_measurement_required", "checks", "findings", "limitations", "follow_up"],
+	"properties": {
+		"outcome": { "type": "string", "enum": ["complete", "needs_followup", "blocked"] },
+		"summary": { "type": "string" },
+		"relevance": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["status", "details", "related_prs", "evidence"],
+			"properties": {
+				"status": { "type": "string", "enum": ["relevant", "overlap", "not_needed", "uncertain"] },
+				"details": { "type": "string" },
+				"related_prs": { "type": "array", "items": { "type": "string" } },
+				"evidence": { "type": "string" }
+			}
+		},
+		"coverage": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["correctness", "resources", "cleanup", "final_diff"],
+			"properties": {
+				"correctness": { "$ref": "#/$defs/assessment" },
+				"resources": { "$ref": "#/$defs/assessment" },
+				"cleanup": { "$ref": "#/$defs/assessment" },
+				"final_diff": { "$ref": "#/$defs/assessment" }
+			}
+		},
+		"is_resource_measurement_required": { "type": "boolean" },
+		"checks": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": ["id", "command", "status", "exit_code", "is_required", "is_baseline_failure", "details", "artifact"],
+				"properties": {
+					"id": { "type": "string" },
+					"command": { "type": "string" },
+					"status": { "type": "string", "enum": ["passed", "failed", "blocked", "not_run"] },
+					"exit_code": { "type": ["integer", "null"] },
+					"is_required": { "type": "boolean" },
+					"is_baseline_failure": { "type": "boolean" },
+					"details": { "type": "string" },
+					"artifact": { "type": "string" }
+				}
+			}
+		},
+		"findings": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": ["severity", "location", "trigger", "expected", "actual", "impact", "origin", "status", "evidence", "repair"],
+				"properties": {
+					"severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+					"location": { "type": "string" },
+					"trigger": { "type": "string" },
+					"expected": { "type": "string" },
+					"actual": { "type": "string" },
+					"impact": { "type": "string" },
+					"origin": { "type": "string", "enum": ["pr", "preexisting", "review"] },
+					"status": { "type": "string", "enum": ["confirmed", "hypothesis", "optional"] },
+					"evidence": { "type": "string" },
+					"repair": { "type": "string" }
+				}
+			}
+		},
+		"limitations": { "type": "array", "items": { "type": "string" } },
+		"follow_up": { "type": "string" }
+	},
+	"$defs": {
+		"assessment": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["status", "details", "checks"],
+			"properties": {
+				"status": { "type": "string", "enum": ["verified", "inspected", "not_applicable", "incomplete"] },
+				"details": { "type": "string" },
+				"checks": { "type": "array", "items": { "type": "string" } }
+			}
+		}
+	}
+}

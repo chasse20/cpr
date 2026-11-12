@@ -1,9 +1,10 @@
 using CPR.Service.Command;
+using CPR.Service.Queue;
 using CPR.SQL;
 
 namespace CPR.Service.GitHub
 {
-	public sealed class GitPublisher( ExternalCommand tCommand, GitHubClient tGitHub, IOptions<Settings> tSettings )
+	public sealed class GitPublisher( ExternalCommand tCommand, GitHubClient tGitHub, IServiceScopeFactory tScopes, QueueGate tGate, IOptions<Settings> tSettings )
 	{
 		private readonly Settings _settings = tSettings.Value;
 
@@ -31,7 +32,7 @@ namespace CPR.Service.GitHub
 
 			GitHubPullRequest tempSnapshot = await tGitHub.ReadAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
 
-			if ( tempSnapshot.IsCrossRepository || tempSnapshot.State != "OPEN" || tempSnapshot.HeadBranch != tRequest.HeadBranch || !string.Equals( tempSnapshot.HeadRepository, tRequest.HeadRepository, StringComparison.OrdinalIgnoreCase ) || tempSnapshot.TargetBranch != tRequest.TargetBranch )
+			if ( tempSnapshot.IsCrossRepository || tempSnapshot.State != "OPEN" || tempSnapshot.HeadBranch != tRequest.HeadBranch || !string.Equals( tempSnapshot.HeadRepository, tRequest.HeadRepository, StringComparison.OrdinalIgnoreCase ) || tempSnapshot.TargetBranch != tRequest.TargetBranch || tRequest.ReviewedTargetSha is null || tempSnapshot.TargetSha != tRequest.ReviewedTargetSha )
 			{
 				throw new InvalidOperationException( "PR destination or branch changed since review; require new approval" );
 			}
@@ -84,6 +85,30 @@ namespace CPR.Service.GitHub
 			if ( !tempAncestor.IsSuccess )
 			{
 				throw new InvalidOperationException( "Approved commit does not fast-forward the remote PR head" );
+			}
+
+			tempSnapshot = await tGitHub.ReadAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
+
+			if ( !WorkflowRules.IsSameSource( tRequest, tempSnapshot ) || tempSnapshot.TargetSha != tRequest.ReviewedTargetSha )
+			{
+				throw new InvalidOperationException( "PR head or target changed before publication; request a fresh review" );
+			}
+
+			await tGate.Mutex.WaitAsync( tCancel );
+
+			try
+			{
+				using IServiceScope tempScope = tScopes.CreateScope();
+				Context tempContext = tempScope.ServiceProvider.GetRequiredService<Context>();
+
+				if ( !await tempContext.PullRequest.AnyAsync( x => x.PullRequestId == tRequest.PullRequestId && x.Status == PullRequestStatus.ReadyForApproval && x.ApprovedSha == tRequest.ApprovedSha && x.ReviewedTargetSha == tRequest.ReviewedTargetSha && x.WorkerId == tWorker.WorkerId, tCancel ) )
+				{
+					throw new InvalidOperationException( "Approval changed before publication" );
+				}
+			}
+			finally
+			{
+				tGate.Mutex.Release();
 			}
 
 			await GitAsync( [ "-C", tempDirectory, "-c", CREDENTIAL_HELPER, "push", tempRemoteUrl, $"{tNewCommit}:refs/heads/{tRequest.HeadBranch}" ], tCancel );

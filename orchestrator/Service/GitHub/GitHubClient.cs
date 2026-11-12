@@ -21,7 +21,7 @@ namespace CPR.Service.GitHub
 		public async Task<GitHubPullRequest> ReadAsync( string tUrl, CancellationToken tCancel )
 		{
 			(string tempRepository, int tempNumber) = Parse( tUrl );
-			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "pr", "view", tUrl, "--json", "state,number,baseRefName,headRefName,headRefOid,headRepository,isCrossRepository,mergeable,mergeStateStatus,isDraft" ], tTimeoutSeconds: 45, tCancel: tCancel );
+			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "pr", "view", tUrl, "--json", "state,number,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,isCrossRepository,mergeable,mergeStateStatus,isDraft,mergedAt,closedAt" ], tTimeoutSeconds: 45, tCancel: tCancel );
 
 			if ( !tempResult.IsSuccess )
 			{
@@ -31,13 +31,74 @@ namespace CPR.Service.GitHub
 			using JsonDocument tempDocument = JsonDocument.Parse( tempResult.Output );
 			JsonElement tempRoot = tempDocument.RootElement;
 			string tempHeadRepository = tempRoot.TryGetProperty( "headRepository", out JsonElement tempHead ) && tempHead.ValueKind == JsonValueKind.Object && tempHead.TryGetProperty( "nameWithOwner", out JsonElement tempFull ) ? tempFull.GetString() ?? tempRepository : tempRepository;
+			string tempState = Get( tempRoot, "state" );
+			DateTimeOffset? tempCompletedAt = tempRoot.TryGetProperty( tempState == "MERGED" ? "mergedAt" : "closedAt", out JsonElement tempDate ) && tempDate.ValueKind == JsonValueKind.String && tempDate.TryGetDateTimeOffset( out DateTimeOffset tempTime ) ? tempTime : null;
 
-			return new( tempRepository, tempNumber, Get( tempRoot, "baseRefName" ), tempHeadRepository.ToLowerInvariant(), Get( tempRoot, "headRefName" ), Get( tempRoot, "headRefOid" ), Get( tempRoot, "state" ), tempRoot.TryGetProperty( "isDraft", out JsonElement tempDraft ) && tempDraft.ValueKind == JsonValueKind.True, Get( tempRoot, "mergeable" ), Get( tempRoot, "mergeStateStatus" ), tempRoot.TryGetProperty( "isCrossRepository", out JsonElement tempCross ) && tempCross.ValueKind == JsonValueKind.True );
+			return new( tempRepository, tempNumber, Get( tempRoot, "baseRefName" ), tempHeadRepository.ToLowerInvariant(), Get( tempRoot, "headRefName" ), Get( tempRoot, "headRefOid" ), tempState, tempRoot.TryGetProperty( "isDraft", out JsonElement tempDraft ) && tempDraft.ValueKind == JsonValueKind.True, Get( tempRoot, "mergeable" ), Get( tempRoot, "mergeStateStatus" ), tempRoot.TryGetProperty( "isCrossRepository", out JsonElement tempCross ) && tempCross.ValueKind == JsonValueKind.True, tempCompletedAt, Get( tempRoot, "baseRefOid" ) );
 		}
 
-		public async Task<CIResult> ReadCIAsync( string tUrl, bool tIsCheckRequired, CancellationToken tCancel )
+		public async Task<JsonElement> ReadReviewContextAsync( string tUrl, CancellationToken tCancel )
+		{
+			(string tempRepository, int tempNumber) = Parse( tUrl );
+			string tempRoot = $"repos/{tempRepository}";
+
+			Task<JsonElement>[] tempTasks =
+			[
+				ReadJsonAsync( [ "api", $"{tempRoot}/pulls/{tempNumber}" ], tCancel ),
+				ReadJsonAsync( [ "api", "--paginate", "--slurp", $"{tempRoot}/issues/{tempNumber}/comments?per_page=100" ], tCancel ),
+				ReadJsonAsync( [ "api", "--paginate", "--slurp", $"{tempRoot}/pulls/{tempNumber}/comments?per_page=100" ], tCancel ),
+				ReadJsonAsync( [ "api", "--paginate", "--slurp", $"{tempRoot}/pulls/{tempNumber}/reviews?per_page=100" ], tCancel ),
+				ReadJsonAsync( [ "pr", "view", tUrl, "--json", "closingIssuesReferences" ], tCancel )
+			];
+			JsonElement[] tempParts = await Task.WhenAll( tempTasks );
+			string tempTarget = tempParts[ 0 ].GetProperty( "base" ).GetProperty( "ref" ).GetString() ?? "";
+			JsonElement tempRelated = await ReadJsonAsync( [ "pr", "list", "--repo", tempRepository, "--base", tempTarget, "--state", "all", "--search", "sort:updated-desc", "--limit", "50", "--json", "number,title,body,url,state,mergedAt,updatedAt,headRefOid,files" ], tCancel );
+			List<object> tempIssues = [];
+
+			foreach ( JsonElement tempIssue in tempParts[ 4 ].GetProperty( "closingIssuesReferences" ).EnumerateArray() )
+			{
+				string tempUrl = tempIssue.GetProperty( "url" ).GetString() ?? "";
+				Match tempMatch = Regex.Match( tempUrl, @"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/issues/([1-9][0-9]*)$" );
+
+				if ( !tempMatch.Success )
+				{
+					throw new InvalidOperationException( "GitHub returned an unsupported linked issue URL" );
+				}
+
+				string tempPath = $"repos/{tempMatch.Groups[ 1 ].Value}/{tempMatch.Groups[ 2 ].Value}/issues/{tempMatch.Groups[ 3 ].Value}";
+
+				Task<JsonElement> tempIssueTask = ReadJsonAsync( [ "api", tempPath ], tCancel );
+				Task<JsonElement> tempCommentsTask = ReadJsonAsync( [ "api", "--paginate", "--slurp", $"{tempPath}/comments?per_page=100" ], tCancel );
+				await Task.WhenAll( tempIssueTask, tempCommentsTask );
+				tempIssues.Add( new { Issue = await tempIssueTask, Comments = await tempCommentsTask } );
+			}
+
+			return JsonSerializer.SerializeToElement( new { PullRequest = tempParts[ 0 ], Discussion = tempParts[ 1 ], ReviewComments = tempParts[ 2 ], Reviews = tempParts[ 3 ], LinkedIssues = tempIssues, RelatedPullRequests = tempRelated, RelatedPullRequestLimit = 50, CapturedAt = DateTimeOffset.UtcNow } );
+		}
+
+		private async Task<JsonElement> ReadJsonAsync( string[] tArguments, CancellationToken tCancel )
+		{
+			CommandResult tempResult = await tCommand.RunAsync( "gh", tArguments, tTimeoutSeconds: 120, tCancel: tCancel );
+
+			if ( !tempResult.IsSuccess )
+			{
+				throw new InvalidOperationException( $"GitHub review context unavailable: {tempResult.Failure}" );
+			}
+
+			using JsonDocument tempDocument = JsonDocument.Parse( tempResult.Output );
+
+			return tempDocument.RootElement.Clone();
+		}
+
+		public async Task<CIResult> ReadCIAsync( string tUrl, GitHubPullRequest tExpected, bool tIsCheckRequired, CancellationToken tCancel )
 		{
 			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "pr", "checks", tUrl, "--required", "--json", "name,bucket,state" ], tTimeoutSeconds: 45, tCancel: tCancel );
+			GitHubPullRequest tempCurrent = await ReadAsync( tUrl, tCancel );
+
+			if ( tempCurrent.State != "OPEN" || tempCurrent.HeadSha != tExpected.HeadSha || tempCurrent.TargetBranch != tExpected.TargetBranch || tempCurrent.TargetSha != tExpected.TargetSha || tempCurrent.HeadBranch != tExpected.HeadBranch || !string.Equals( tempCurrent.HeadRepository, tExpected.HeadRepository, StringComparison.OrdinalIgnoreCase ) )
+			{
+				throw new InvalidOperationException( "PR changed while reading CI; check again before advancing" );
+			}
 
 			// GitHub returns JSON even when checks are pending or failed
 			if ( string.IsNullOrWhiteSpace( tempResult.Output ) )

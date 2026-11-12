@@ -1,6 +1,6 @@
 namespace CPR.SQL
 {
-	[Table( "PullRequest", Schema = "dbo" )]
+	[Table( "PullRequest", Schema = "cpr" )]
 	[Index( nameof( Repository ), nameof( Number ), IsUnique = true )]
 	[Index( nameof( Repository ), nameof( TargetBranch ), nameof( PullRequestId ) )]
 	[Index( nameof( WorkerId ), IsUnique = true )]
@@ -24,11 +24,15 @@ namespace CPR.SQL
 		public PullRequestStatus Status { get; set; } = PullRequestStatus.WaitingToBeProcessed;
 		public PullRequestWorkReason WorkReason { get; set; } = PullRequestWorkReason.InitialReview;
 		public int? WorkerId { get; set; }
+		public int? WorkspaceWorkerId { get; set; }
+		public int[] StorageWorkerIds { get; set; } = [];
 		[MaxLength( 128 )]
 		public string? SessionId { get; set; }
 		// Prepared and approved snapshots hold Git tree hashes
 		[MaxLength( 64 )]
 		public string? PreparedSha { get; set; }
+		[MaxLength( 64 )]
+		public string? ReviewedTargetSha { get; set; }
 		[MaxLength( 64 )]
 		public string? ApprovedSha { get; set; }
 		[MaxLength( 64 )]
@@ -36,8 +40,15 @@ namespace CPR.SQL
 		[MaxLength( 4096 )]
 		public string? LastError { get; set; }
 		public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+		public DateTimeOffset? CompletedAt { get; set; }
+		public DateTimeOffset? CleanupRequestedAt { get; set; }
+		public DateTimeOffset? CleanedAt { get; set; }
 		[ForeignKey( nameof( WorkerId ) )]
+		[InverseProperty( nameof( SQL.Worker.PullRequest ) )]
 		[DeleteBehavior( DeleteBehavior.Restrict )]
 		public Worker? Worker { get; set; }
+		[ForeignKey( nameof( WorkspaceWorkerId ) )]
+		[DeleteBehavior( DeleteBehavior.Restrict )]
+		public Worker? WorkspaceWorker { get; set; }
 	}
 }
