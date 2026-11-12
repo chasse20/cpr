@@ -28,6 +28,29 @@ jq -n --argjson id "$ID" --arg url "$(decode "$URL64")" --arg started "$(date -u
   --arg scratch "$SCRATCH" --arg version "$(codex --version)" \
   '{cpr_id: $id, url: $url, status: "running", started_at: $started, scratch: $scratch, codex_version: $version, attempts: []}' > "$RUN/manifest.json"
 
+record_usage() {
+  local events="$ATTEMPT/events.jsonl"
+  if ! test -f "$events"; then events=/dev/null; fi
+  jq -Rn --argjson exit_code "$1" '
+    reduce inputs as $line (
+      {input_tokens: null, cached_input_tokens: null, output_tokens: null, is_complete: true, started_turns: 0, completed_turns: 0};
+      ($line | (fromjson? | objects) // {}) as $event |
+      if $event.type == "turn.started" then .started_turns += 1
+      elif $event.type == "turn.completed" then
+        .completed_turns += 1 |
+        (($event.usage | objects) // {}) as $usage |
+        if ([$usage.input_tokens, $usage.cached_input_tokens, $usage.output_tokens] |
+          all(.[]; type == "number" and . >= 0 and . == floor)) and $usage.cached_input_tokens <= $usage.input_tokens then
+          .input_tokens = ((.input_tokens // 0) + $usage.input_tokens) |
+          .cached_input_tokens = ((.cached_input_tokens // 0) + $usage.cached_input_tokens) |
+          .output_tokens = ((.output_tokens // 0) + $usage.output_tokens)
+        else .is_complete = false end
+      elif $event.type == "turn.failed" or $event.type == "error" or $event.type == null then .is_complete = false
+      else . end)
+    | .is_complete = (.is_complete and $exit_code == 0 and .completed_turns > 0 and .started_turns == .completed_turns)
+    | del(.started_turns, .completed_turns)' "$events" > "$ATTEMPT/usage.json"
+}
+
 finish_review() {
   review_exit=$?
   trap - EXIT
@@ -39,6 +62,13 @@ finish_review() {
     wait "$review_pid" 2>/dev/null
   fi
   rm -f -- "$JOB/process-$operation"
+  if test -n "${ATTEMPT:-}" && test -f "$ATTEMPT/attempt.json" && jq -e '.status == "running"' "$ATTEMPT/attempt.json" >/dev/null; then
+    if ! { record_usage "$review_exit" && jq --arg ended "$(date -u +%FT%TZ)" --argjson code "$review_exit" --slurpfile usage "$ATTEMPT/usage.json" \
+      '.status = "failed" | .completed_at = $ended | .exit_code = $code | .usage = $usage[0]' "$ATTEMPT/attempt.json" > "$ATTEMPT/attempt.tmp" && mv "$ATTEMPT/attempt.tmp" "$ATTEMPT/attempt.json"; }; then
+      echo 'Unable to retain interrupted attempt usage' >&2
+      if test "$review_exit" = 0; then review_exit=14; fi
+    fi
+  fi
   if ! { mkdir -p "$RUN/artifacts" && cp -a "$SCRATCH/." "$RUN/artifacts/"; }; then
     echo "Unable to retain review artifacts from $SCRATCH" >&2
     if test "$review_exit" = 0; then review_exit=14; fi
@@ -178,12 +208,7 @@ CPR_REVIEW_CONTEXT
       session="$next_session"
       printf '%s\n' "$session" > "$JOB/session-id"
     fi
-    jq -Rn 'reduce inputs as $line ({input_tokens: 0, cached_input_tokens: 0, output_tokens: 0}; ($line | (fromjson? | objects) // {}) as $event |
-      if $event.type == "turn.completed" then
-        .input_tokens += ($event.usage.input_tokens // 0) |
-        .cached_input_tokens += ($event.usage.cached_input_tokens // 0) |
-        .output_tokens += ($event.usage.output_tokens // 0)
-      else . end)' "$ATTEMPT/events.jsonl" > "$ATTEMPT/usage.json"
+    record_usage "$exit_code"
     output_tree="$(fingerprint)"
     jq --arg session "$session" --arg output "$output_tree" --arg ended "$(date -u +%FT%TZ)" \
       --argjson code "$exit_code" --slurpfile usage "$ATTEMPT/usage.json" \

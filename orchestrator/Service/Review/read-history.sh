@@ -13,7 +13,9 @@ for run in "$JOB"/runs/*; do
     result_data='null'
     changes=''
     for attempt in "${attempts[@]}"; do
-      attempt_data="$(jq -c --argjson attempt "$(read_json "$attempt")" '. + [$attempt]' <<< "$attempt_data")"
+      attempt_result='null'
+      if test -f "${attempt%/*}/result.json"; then attempt_result="$(read_json "${attempt%/*}/result.json")"; fi
+      attempt_data="$(jq -c --argjson attempt "$(read_json "$attempt")" --argjson result "$attempt_result" '. + [$attempt + {result: $result}]' <<< "$attempt_data")"
     done
     if test -f "$run/result.json"; then
       result_data="$(read_json "$run/result.json")"

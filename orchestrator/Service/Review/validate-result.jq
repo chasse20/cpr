@@ -1,35 +1,53 @@
 # Validate evidence structure independently of a successful Codex exit
 def text: type == "string" and test("\\S");
-. as $result
-| .outcome == "complete"
-and (.summary | text)
-and (.relevance.status | IN("relevant", "overlap"))
-and (.relevance.details | text)
-and (.relevance.evidence | text)
-and (.relevance.related_prs | type == "array")
-and (.checks | type == "array")
-and ([.checks[].id] | length == (unique | length))
-and all(.checks[];
-	(.id | text) and (.command | text) and (.details | text)
-	and (.status | IN("passed", "failed", "blocked", "not_run"))
-	and (.is_required | type == "boolean")
-	and (.is_baseline_failure | type == "boolean")
-	and (if .status == "passed" then .exit_code == 0 and (.artifact | text)
-		elif .status == "failed" then (.exit_code | type == "number" and . != 0)
-		else .exit_code == null end)
-	and (if .is_required then .status == "passed" or (.status == "failed" and .is_baseline_failure and (.artifact | text)) else true end))
-and (.coverage | keys == ["cleanup", "correctness", "final_diff", "resources"])
-and all(.coverage[];
-	(.details | text)
-	and (.status | IN("verified", "inspected", "not_applicable", "incomplete"))
-	and (.checks | type == "array")
-	and all(.checks[]; . as $id | any($result.checks[]; .id == $id))
-	and (if .status == "verified" then
-		(.checks | length > 0) and all(.checks[]; . as $id | any($result.checks[]; .id == $id and .status == "passed"))
-		else true end))
-and (.is_resource_measurement_required | type == "boolean")
-and (if $is_final then
-	all(.coverage[]; .status != "incomplete")
-	and .coverage.final_diff.status == "verified"
-	and (if .is_resource_measurement_required then .coverage.resources.status == "verified" else true end)
-	else true end)
+def require($condition; $message): if $condition then . else error($message) end;
+def issue($condition; $message): if $condition then empty else $message end;
+require(type == "object"; "Result must be an object")
+| require(.relevance | type == "object"; "relevance must be an object")
+| require(.checks | type == "array"; "checks must be an array")
+| require(all(.checks[]; type == "object"); "Each check must be an object")
+| require(.coverage | type == "object"; "coverage must be an object")
+| require(all(.coverage[]; type == "object"); "Each coverage assessment must be an object")
+| require(all(.coverage[]; .checks | type == "array"); "Each coverage assessment must list its check IDs in a checks array")
+| . as $result
+| [
+	issue(.outcome == "complete"; "outcome must be complete after the assigned work is done"),
+	issue(.summary | text; "summary must explain the review result"),
+	issue(.relevance.status | IN("relevant", "overlap"); "relevance.status must be relevant or overlap; unresolved relevance blocks completion"),
+	issue(.relevance.details | text; "relevance.details must explain the relevance decision"),
+	issue(.relevance.evidence | text; "relevance.evidence must support the relevance decision"),
+	issue(.relevance.related_prs | type == "array"; "relevance.related_prs must be an array"),
+	issue([.checks[].id] | length == (unique | length); "checks must have unique IDs"),
+	(.checks | to_entries[] | .key as $index | .value | "checks[\($index)] (\(.id // "missing ID"))" as $label |
+		issue(.id | text; "\($label).id must be nonempty"),
+		issue(.command | text; "\($label).command must identify the actual command"),
+		issue(.details | text; "\($label).details must explain the result"),
+		issue(.status | IN("passed", "failed", "blocked", "not_run"); "\($label).status must be passed, failed, blocked, or not_run"),
+		issue(.is_required | type == "boolean"; "\($label).is_required must be a boolean"),
+		issue(.is_baseline_failure | type == "boolean"; "\($label).is_baseline_failure must be a boolean"),
+		issue(.artifact | type == "string"; "\($label).artifact must be a relative evidence path or an empty string"),
+		(if .status == "passed" then
+			issue(.exit_code == 0; "\($label): passed checks require exit_code 0"),
+			issue(.artifact | text; "\($label): passed checks require a retained evidence artifact")
+		elif .status == "failed" then
+			issue(.exit_code | type == "number" and . != 0; "\($label): failed checks require a nonzero exit_code")
+		else issue(.exit_code == null; "\($label): blocked or unrun checks require a null exit_code") end),
+		issue(.is_required != true or .status == "passed" or (.status == "failed" and .is_baseline_failure == true and (.artifact | text));
+			"\($label): required checks must pass or retain evidence of a demonstrated baseline failure")),
+	issue(.coverage | keys == ["cleanup", "correctness", "final_diff", "resources"]; "coverage must contain correctness, resources, cleanup, and final_diff"),
+	(.coverage | to_entries[] | "coverage.\(.key)" as $label | .value |
+		issue(.details | text; "\($label).details must explain the assessment"),
+		issue(.status | IN("verified", "inspected", "not_applicable", "incomplete"); "\($label).status must be verified, inspected, not_applicable, or incomplete"),
+		(.checks[] | . as $id | issue(any($result.checks[]; .id == $id); "\($label) references unknown check \($id)")),
+		(if .status == "verified" then
+			issue(.checks | length > 0; "\($label): verified coverage requires check IDs"),
+			(.checks[] | . as $id | issue(any($result.checks[]; .id == $id and .status == "passed"); "\($label): check \($id) must pass to support verified coverage"))
+		else empty end),
+		(if $is_final then issue(.status != "incomplete"; "\($label) is incomplete; complete the missing required work before final validation") else empty end)),
+	issue(.is_resource_measurement_required | type == "boolean"; "is_resource_measurement_required must be a boolean"),
+	(if $is_final then
+		issue(.coverage.final_diff.status == "verified"; "coverage.final_diff must be verified with retained final-diff evidence"),
+		issue(.is_resource_measurement_required != true or .coverage.resources.status == "verified"; "coverage.resources must be verified with retained measurements when resource measurement is required")
+	else empty end)
+]
+| if length == 0 then true else error(join("\n")) end

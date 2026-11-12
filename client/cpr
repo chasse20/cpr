@@ -141,6 +141,10 @@ case "$command_name" in
     valid_id "$1"
     result=$(request GET "/api/pr/$1")
     jq -r '
+      def usage_summary:
+        if .usage.input_tokens == null or .usage.cached_input_tokens == null or .usage.output_tokens == null then "tokens unknown"
+        else "tokens " + (if .usage.is_complete == true then "" else "at least " end) +
+          "input=\(.usage.input_tokens), cached=\(.usage.cached_input_tokens), output=\(.usage.output_tokens)" end;
       "PR #\(.number)  \(.repository)  CPR \(.id)  \(.status)",
       "Target: \(.targetBranch)  Head: \(.remoteSha)",
       (if .preparedSha != null then "Prepared tree: \(.preparedSha)  Reviewed target: \(.reviewedTargetSha)" else empty end),
@@ -149,7 +153,9 @@ case "$command_name" in
       (if .cleanupRequestedAt != null then "Files: \(if .cleanedAt != null then "deleted" else "cleanup pending on workers " + (.storageWorkerIds | map(tostring) | join(", ")) end)" else empty end),
       (.runs[]? | .details |
         "\nRun \(.key): \(.manifest.status // "unknown")",
-        (.attempts[]? | "  \(.step // "unknown"): \(.model // "?") / \(.reasoning_effort // "?")  \(.status // "unknown"); tokens input=\(.usage.input_tokens // 0), cached=\(.usage.cached_input_tokens // 0), output=\(.usage.output_tokens // 0)"),
+        (.attempts[]? | "  \(.step // "unknown") attempt \(.attempt // "?"): \(.model // "?") / \(.reasoning_effort // "?")  \(.status // "unknown"); \(usage_summary)",
+          (.result // {} | (.summary // .capture_error // empty | "    Result: " + .),
+            (.findings[]? | "    Finding [\(.severity)] \(.location): \(.impact)"))),
         (.result // {} | .summary // empty,
           ((.coverage // {}) | to_entries[] | "Coverage [\(.key)]: \(.value.status) — \(.value.details)"),
           (if .relevance != null then "Relevance: \(.relevance.status) — \(.relevance.details)" else empty end),

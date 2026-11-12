@@ -86,7 +86,8 @@ Parallel.For
 - Keep workspace ownership separate from active worker assignments. Preserve the validated workspace and release its worker while awaiting approval; reserve it again for editing or publication.
 - Serialize queue changes with worker scheduling and publication. Rereview invalidates approval; removing tracking preserves work and never closes the GitHub PR.
 - Retain `Merged`, `Closed`, and `Removed` records outside active merge ordering. Merged and closed PRs retain only database history; automatically delete their files under worker locks. Removed PRs preserve files until explicit purge. Track remaining copies per worker and record completion after every recorded copy and orchestrator storage is deleted.
-- Persist compact review results and usage before deleting files. Block stale or interrupted reviews, revoke stale approvals, and release idle workers without discarding unpublished work.
+- Persist each attempt's compact review result and usage before deleting files; distinguish complete, partial, and unknown usage. Completion gates must explain missing requirements so retries can address them.
+- Block stale or interrupted reviews, revoke stale approvals, and release idle workers without discarding unpublished work.
 - Group `Service/` by responsibility. Keep service records with the services that use them and request records with their controllers.
 - Remove unused parameters and obsolete configuration properties together with their arguments and settings.
 - Use structured logging templates and preserve cancellation and resource lifetimes.
