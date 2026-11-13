@@ -126,13 +126,13 @@ Full review files live under `/state/cpr/jobs/ID/runs/RUN/` on the worker until 
 
 ## Workers
 
-`server/` contains `compose.yaml` and the worker `Dockerfile`. Compose uses the published orchestrator image directly and builds the Codex/Git/SSH worker image on the server. A separate worker image does not need to be pushed to a registry. The image includes stable Rust with rustfmt and Clippy, available to SSH sessions without installing components into the read-only root filesystem.
+`server/` contains `compose.yaml`, the worker `Dockerfile`, `sshd_config`, and `worker-instructions.md`. Compose loads the two config files from disk so they can be mounted into read-only containers. Compose uses the published orchestrator image directly and builds the Codex/Git/SSH worker image on the server. A separate worker image does not need to be pushed to a registry. The image includes stable Rust with rustfmt and Clippy, available to SSH sessions without installing components into the read-only root filesystem.
 
 The example has nine workers: 101–103 use GPU `0`, 104–106 use GPU `1`, and 107–109 use GPU `2`. Each worker defines its own `device_ids`; GPU indices and UUIDs are supported. Change these assignments to match the machine, or remove a worker's `deploy` block to run it without a GPU.
 
 Compose creates the SSH identities, worker Git configuration, and persistent directories under `data/`. Checkouts, Codex state, and SSH identities survive container restarts. Back up `data/` and the PostgreSQL database when moving the deployment.
 
-Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces inside Docker. Codex runs with `workspace-write`; the worker root filesystem remains read-only, and GitHub publication credentials stay in the orchestrator.
+Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces inside Docker. Automated reviews and `cpr connect` run Codex with `workspace-write` and `sandbox_workspace_write.network_access=true`, allowing shell commands to download dependencies and access remote sources. Both launch paths also grant write access to `/state/cargo` with `--add-dir`, so Cargo can populate its persistent dependency cache. The worker root filesystem remains read-only, and GitHub publication credentials stay in the orchestrator.
 
 ## Client
 
@@ -191,7 +191,7 @@ psql -X -h YOUR_POSTGRES_HOST -p 5432 -U cpr_app -d YOUR_DATABASE \
 
 For remote TLS connections, the Compose example uses `SSL Mode=VerifyFull`; configure the PostgreSQL hostname and trusted CA certificate to match your server.
 
-Copy `server/compose.yaml` and `server/Dockerfile` to a directory such as `~/cpr` on the server. An orchestrator source checkout is not needed there. Edit `x-settings` in `compose.yaml` with the published image reference, database connection, GitHub token, Git name/email, and desktop SSH public key. Keep the configured copy private, and write literal dollar signs as `$$` in Compose values.
+Copy `server/compose.yaml`, `server/Dockerfile`, `server/sshd_config`, and `server/worker-instructions.md` to the same directory, such as `~/cpr`, on the server. If using a configured `compose.private.yaml`, copy it as `compose.yaml`. An orchestrator source checkout is not needed there. Edit `x-settings` in `compose.yaml` with the published image reference, database connection, GitHub token, Git name/email, and desktop SSH public key. Keep the configured copy private, and write literal dollar signs as `$$` in Compose values.
 
 Start the containers on the server:
 

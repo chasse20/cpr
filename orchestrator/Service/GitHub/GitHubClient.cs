@@ -32,9 +32,11 @@ namespace CPR.Service.GitHub
 			JsonElement tempRoot = tempDocument.RootElement;
 			string tempHeadRepository = tempRoot.TryGetProperty( "headRepository", out JsonElement tempHead ) && tempHead.ValueKind == JsonValueKind.Object && tempHead.TryGetProperty( "nameWithOwner", out JsonElement tempFull ) ? tempFull.GetString() ?? tempRepository : tempRepository;
 			string tempState = Get( tempRoot, "state" );
+			string tempTarget = Get( tempRoot, "baseRefName" );
+			string tempTargetSha = tempState == "OPEN" ? await ReadTargetShaAsync( tempRepository, tempTarget, tCancel ) : Get( tempRoot, "baseRefOid" );
 			DateTimeOffset? tempCompletedAt = tempRoot.TryGetProperty( tempState == "MERGED" ? "mergedAt" : "closedAt", out JsonElement tempDate ) && tempDate.ValueKind == JsonValueKind.String && tempDate.TryGetDateTimeOffset( out DateTimeOffset tempTime ) ? tempTime : null;
 
-			return new( tempRepository, tempNumber, Get( tempRoot, "baseRefName" ), tempHeadRepository.ToLowerInvariant(), Get( tempRoot, "headRefName" ), Get( tempRoot, "headRefOid" ), tempState, tempRoot.TryGetProperty( "isDraft", out JsonElement tempDraft ) && tempDraft.ValueKind == JsonValueKind.True, Get( tempRoot, "mergeable" ), Get( tempRoot, "mergeStateStatus" ), tempRoot.TryGetProperty( "isCrossRepository", out JsonElement tempCross ) && tempCross.ValueKind == JsonValueKind.True, tempCompletedAt, Get( tempRoot, "baseRefOid" ) );
+			return new( tempRepository, tempNumber, tempTarget, tempHeadRepository.ToLowerInvariant(), Get( tempRoot, "headRefName" ), Get( tempRoot, "headRefOid" ), tempState, tempRoot.TryGetProperty( "isDraft", out JsonElement tempDraft ) && tempDraft.ValueKind == JsonValueKind.True, Get( tempRoot, "mergeable" ), Get( tempRoot, "mergeStateStatus" ), tempRoot.TryGetProperty( "isCrossRepository", out JsonElement tempCross ) && tempCross.ValueKind == JsonValueKind.True, tempCompletedAt, tempTargetSha );
 		}
 
 		public async Task<JsonElement> ReadReviewContextAsync( string tUrl, CancellationToken tCancel )
@@ -52,6 +54,7 @@ namespace CPR.Service.GitHub
 			];
 			JsonElement[] tempParts = await Task.WhenAll( tempTasks );
 			string tempTarget = tempParts[ 0 ].GetProperty( "base" ).GetProperty( "ref" ).GetString() ?? "";
+			string tempTargetSha = await ReadTargetShaAsync( tempRepository, tempTarget, tCancel );
 			JsonElement tempRelated = await ReadJsonAsync( [ "pr", "list", "--repo", tempRepository, "--base", tempTarget, "--state", "all", "--search", "sort:updated-desc", "--limit", "50", "--json", "number,title,body,url,state,mergedAt,updatedAt,headRefOid,files" ], tCancel );
 			List<object> tempIssues = [];
 
@@ -73,7 +76,23 @@ namespace CPR.Service.GitHub
 				tempIssues.Add( new { Issue = await tempIssueTask, Comments = await tempCommentsTask } );
 			}
 
-			return JsonSerializer.SerializeToElement( new { PullRequest = tempParts[ 0 ], Discussion = tempParts[ 1 ], ReviewComments = tempParts[ 2 ], Reviews = tempParts[ 3 ], LinkedIssues = tempIssues, RelatedPullRequests = tempRelated, RelatedPullRequestLimit = 50, CapturedAt = DateTimeOffset.UtcNow } );
+			return JsonSerializer.SerializeToElement( new { PullRequest = tempParts[ 0 ], TargetSha = tempTargetSha, Discussion = tempParts[ 1 ], ReviewComments = tempParts[ 2 ], Reviews = tempParts[ 3 ], LinkedIssues = tempIssues, RelatedPullRequests = tempRelated, RelatedPullRequestLimit = 50, CapturedAt = DateTimeOffset.UtcNow } );
+		}
+
+		private async Task<string> ReadTargetShaAsync( string tRepository, string tBranch, CancellationToken tCancel )
+		{
+			// PR base SHAs may lag behind the current branch tip
+			string tempBranch = string.Join( "/", tBranch.Split( '/' ).Select( Uri.EscapeDataString ) );
+			JsonElement tempReference = await ReadJsonAsync( [ "api", $"repos/{tRepository}/git/ref/heads/{tempBranch}" ], tCancel );
+			JsonElement tempObject = tempReference.GetProperty( "object" );
+			string tempSha = Get( tempObject, "sha" );
+
+			if ( Get( tempReference, "ref" ) != $"refs/heads/{tBranch}" || Get( tempObject, "type" ) != "commit" || !Regex.IsMatch( tempSha, "^[a-f0-9]{40}$" ) )
+			{
+				throw new InvalidOperationException( $"GitHub returned an invalid target branch reference for {tRepository}:{tBranch}" );
+			}
+
+			return tempSha;
 		}
 
 		private async Task<JsonElement> ReadJsonAsync( string[] tArguments, CancellationToken tCancel )

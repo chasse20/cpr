@@ -10,3 +10,4 @@ server/data/
 orchestrator/data/
 appsettings.Private.json
 *.csproj.user
+compose.private.yaml

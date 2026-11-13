@@ -1,0 +1,22 @@
+Port 22
+ListenAddress 0.0.0.0
+HostKey /state/ssh/ssh_host_ed25519_key
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AuthorizedKeysFile /etc/cpr/keys/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+AllowUsers coder
+UsePAM no
+StrictModes yes
+AllowAgentForwarding no
+AllowTcpForwarding local
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PermitTTY yes
+PrintMotd no
+LogLevel VERBOSE
+SetEnv CODEX_HOME=/state/home/coder/.codex CARGO_HOME=/state/cargo RUSTUP_HOME=/opt/rustup

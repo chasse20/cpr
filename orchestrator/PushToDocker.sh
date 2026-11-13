@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-tempRegistry="xxx.xxx.xxx.xxx"
+tempRegistry="10.0.20.10:5000"
 tempImage="cpr:latest"
 tempDirectory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 tempRemoteImage="$tempRegistry/$tempImage"

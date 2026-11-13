@@ -120,7 +120,8 @@ test "$(jq -r '.Context.PullRequest.state' "$RUN/plan.json")" = open || { echo '
 test "$TARGET" = "$(jq -r '.Context.PullRequest.base.ref' "$RUN/plan.json")" || { echo 'PR target branch changed before review' >&2; exit 6; }
 git -C "$ROOT" fetch --no-tags origin "refs/heads/$TARGET" >/dev/null
 target_sha="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
-test "$target_sha" = "$(jq -r '.Context.PullRequest.base.sha' "$RUN/plan.json")" || { echo 'Target changed while preparing review context' >&2; exit 6; }
+expected_target_sha="$(jq -er '.Context.TargetSha' "$RUN/plan.json")"
+test "$target_sha" = "$expected_target_sha" || { echo "Target changed while preparing review context: expected $expected_target_sha, fetched $target_sha" >&2; exit 6; }
 if test "$is_validation_only" = true || test "$is_rereview" = true; then
   if test -s "$JOB/session-id"; then session="$(cat "$JOB/session-id")"; fi
 fi
@@ -184,7 +185,7 @@ CPR_REVIEW_CONTEXT
     jq --arg path "$ATTEMPT" '.attempts += [$path] | .current_attempt = $path' "$RUN/manifest.json" > "$RUN/manifest.tmp"
     mv "$RUN/manifest.tmp" "$RUN/manifest.json"
 
-    command=(codex --ask-for-approval never exec --sandbox workspace-write)
+    command=(codex --ask-for-approval never -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write --add-dir /state/cargo)
     if test -n "$session"; then command+=(resume); fi
     command+=(--json --model "$model" -c "model_reasoning_effort=\"$effort\"" --output-schema "$RUN/result.schema.json" --output-last-message "$ATTEMPT/result.json")
     if test -n "$session"; then command+=("$session"); fi

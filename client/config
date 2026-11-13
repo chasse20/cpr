@@ -1,4 +1,4 @@
 # Copy this file to ~/.config/cpr/config and edit the values there.
-CPR_API_URL=http://127.0.0.1:18080
+CPR_API_URL=http://10.0.20.20:18080
 CPR_CHECKOUT_DIR=~/.local/share/cpr/checkouts
 CPR_HTTP_TIMEOUT=120
