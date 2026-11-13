@@ -25,8 +25,8 @@ cat > "$RUN/report-result.jq" <<'CPR_RESULT_REPORT'
 CPR_RESULT_REPORT
 
 jq -n --argjson id "$ID" --arg url "$(decode "$URL64")" --arg started "$(date -u +%FT%TZ)" \
-  --arg scratch "$SCRATCH" --arg version "$(codex --version)" \
-  '{cpr_id: $id, url: $url, status: "running", started_at: $started, scratch: $scratch, codex_version: $version, attempts: []}' > "$RUN/manifest.json"
+  --arg scratch "$SCRATCH" --arg version "$(codex --version)" --slurpfile plan "$RUN/plan.json" \
+  '{cpr_id: $id, url: $url, status: "running", started_at: $started, scratch: $scratch, codex_version: $version, maintainer_resolution: $plan[0].MaintainerResolution, attempts: []}' > "$RUN/manifest.json"
 
 record_usage() {
   local events="$ATTEMPT/events.jsonl"
@@ -103,6 +103,13 @@ fingerprint() {
   GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" write-tree
 }
 
+check_worktree() {
+  if test "$is_final" = true && ! GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" diff --cached --check "$head_sha"; then
+    echo 'Resolve conflict markers and whitespace errors in the working tree; CPR handles staging.'
+    return 1
+  fi
+}
+
 check_artifacts() {
   while IFS= read -r artifact; do
     if test -n "$artifact"; then
@@ -166,6 +173,10 @@ for ((step=0; step<step_count; ++step)); do
     input_tree="$(fingerprint)"
     started="$(date -u +%FT%TZ)"
     jq -r --argjson step "$step" '.Steps[$step].Prompt' "$RUN/plan.json" > "$ATTEMPT/prompt.txt"
+    if jq -e '.MaintainerResolution != null and .MaintainerResolution != ""' "$RUN/plan.json" >/dev/null; then
+      printf '\n\n## Explicit maintainer resolution supplied through CPR\n' >> "$ATTEMPT/prompt.txt"
+      jq -r '.MaintainerResolution' "$RUN/plan.json" >> "$ATTEMPT/prompt.txt"
+    fi
     cat >> "$ATTEMPT/prompt.txt" <<CPR_REVIEW_CONTEXT
 
 CPR execution facts:
@@ -176,6 +187,7 @@ CPR execution facts:
 - Previous run (empty if none): $previous_run. Its artifacts and results are read-only historical evidence. Reuse only evidence still valid for the current tree; copy reused evidence into the current evidence directory and update its references.
 - Previous checkout archived when upstream changed (empty if none): $(cat "$JOB/previous-workspace" 2>/dev/null || true). Inspect its unpublished repairs and reapply only those still relevant; preserve the archive.
 - Save raw check output, probe sources, and measurement results under $SCRATCH/evidence. Use unique filenames so later checks preserve earlier evidence. checks[].artifact paths are relative to $SCRATCH, starting with evidence/; use regular files without symlinks or parent-directory components.
+- Git metadata (.git), including the index, is read-only inside Codex. Resolve conflicts by editing or deleting working-tree files; leave all edits unstaged. Inspect git diff HEAD and run git diff HEAD --check; inspect untracked files separately. Unmerged index entries and denied git add attempts alone are not blockers once file contents are resolved and validated. CPR independently checks the final contents for conflict markers and whitespace errors, then stages them after successful review; do not report staging as a required reviewer check or change Git metadata permissions.
 - Final coverage must describe the current working tree. Do not modify code after completing its final checks.
 - The runner records commands and usage and writes the report. Return only the requested structured result; do not edit CPR state or commit anything.
 CPR_REVIEW_CONTEXT
@@ -224,7 +236,8 @@ CPR_REVIEW_CONTEXT
     jq -r -f "$RUN/report-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/report.md"
     cp "$ATTEMPT/report.md" "$JOB/report.md"
 
-    if jq -e --argjson is_final "$is_final" -f "$RUN/validate-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/gate.txt" 2>&1 && check_artifacts >> "$ATTEMPT/gate.txt" 2>&1; then
+    if jq -e --argjson is_final "$is_final" -f "$RUN/validate-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/gate.txt" 2>&1 &&
+       check_artifacts >> "$ATTEMPT/gate.txt" 2>&1 && check_worktree >> "$ATTEMPT/gate.txt" 2>&1; then
       is_complete=true
     else
       printf '\nCompletion requires coherent check results, retained evidence, and all required final coverage.\n' >> "$ATTEMPT/gate.txt"

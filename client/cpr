@@ -19,7 +19,8 @@ Usage: cpr COMMAND
   remove ID         Stop tracking; preserve saved work and database history
   purge ID          Stop tracking and delete all PR files, including edits
   cancel ID         Stop a review; preserve edits and release its worker
-  review ID         Review the latest comments and require fresh approval
+  review ID [--resolution TEXT]
+                    Rereview, optionally recording a maintainer decision
   checkout ID       Copy the saved PR checkout locally
   connect ID        Open Codex; validate edits when you exit successfully
   approve ID        Approve the prepared changes for publication
@@ -40,7 +41,10 @@ case "$command_name" in
     (($# == 0)) || fail "Usage: cpr $command_name" ;;
   add)
     (($# == 1)) || fail 'Usage: cpr add URL (one PR at a time)' ;;
-  checkout|connect|approve|remove|review|show|cancel|purge)
+  review)
+    (($# == 1 || $# == 3)) || fail 'Usage: cpr review ID [--resolution TEXT]'
+    if (($# == 3)); then [[ $2 == --resolution ]] || fail 'Usage: cpr review ID [--resolution TEXT]'; fi ;;
+  checkout|connect|approve|remove|show|cancel|purge)
     (($# == 1)) || fail "Usage: cpr $command_name ID" ;;
   pause|resume)
     (($# == 1)) || fail "Usage: cpr $command_name WORKER_ID" ;;
@@ -150,9 +154,11 @@ case "$command_name" in
       (if .preparedSha != null then "Prepared tree: \(.preparedSha)  Reviewed target: \(.reviewedTargetSha)" else empty end),
       "Next: \(.nextAction)",
       (if .lastError != null then "Reason: \(.lastError)" else empty end),
+      (if .maintainerResolution != null then "Maintainer resolution: \(.maintainerResolution)" else empty end),
       (if .cleanupRequestedAt != null then "Files: \(if .cleanedAt != null then "deleted" else "cleanup pending on workers " + (.storageWorkerIds | map(tostring) | join(", ")) end)" else empty end),
       (.runs[]? | .details |
         "\nRun \(.key): \(.manifest.status // "unknown")",
+        (if .manifest.maintainer_resolution != null then "  Maintainer resolution: \(.manifest.maintainer_resolution)" else empty end),
         (.attempts[]? | "  \(.step // "unknown") attempt \(.attempt // "?"): \(.model // "?") / \(.reasoning_effort // "?")  \(.status // "unknown"); \(usage_summary)",
           (.result // {} | (.summary // .capture_error // empty | "    Result: " + .),
             (.findings[]? | "    Finding [\(.severity)] \(.location): \(.impact)"))),
@@ -165,7 +171,17 @@ case "$command_name" in
           (if .follow_up != null and .follow_up != "" then "Follow-up: \(.follow_up)" else empty end),
           .capture_error // empty),
         (if .changes != "" then .changes else empty end))' <<< "$result" ;;
-  approve|review|remove|cancel|purge)
+  review)
+    valid_id "$1"; need jq
+    payload=''
+    if (($# == 3)); then
+      current=$(request GET "/api/pr/$1")
+      jq -e 'has("maintainerResolution")' <<< "$current" >/dev/null || fail 'Server does not support maintainer resolutions; update the CPR schema and orchestrator first.'
+      payload=$(jq -cn --arg resolution "$3" '{resolution: $resolution}')
+    fi
+    result=$(request POST "/api/pr/$1/review" "$payload")
+    jq -r '.message' <<< "$result" ;;
+  approve|remove|cancel|purge)
     (($# == 1)) || fail "Usage: cpr $command_name ID"
     valid_id "$1"
     if [[ $command_name == remove ]]; then

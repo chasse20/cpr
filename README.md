@@ -10,6 +10,7 @@ Work advances independently for each repository and target branch. Each PR keeps
 - SSH access for interactive work and local checkout copies
 - approval tied to the exact prepared Git tree
 - GitHub CI monitoring with interactive recovery for failed checks
+- optional Discord webhook messages for PR status changes
 - retained `Merged` and `Closed` records with automatic PR file cleanup
 - Docker Compose for worker startup, SSH identities, and Git configuration
 - GPU assignment per worker, without a fixed GPU count
@@ -62,6 +63,8 @@ flowchart TD
 
 `cpr review ID` requests another AI review, including after approval or publication. It clears pending approval, fetches the latest comments when the worker starts, and explicitly reassesses new or unresolved feedback. Saved unpublished work stays on its workspace worker, and the review resumes its Codex session when available. After publication, a new checkout uses the current PR head. Successful rereview returns to `ReadyForApproval` and releases the worker; publishing requires another `cpr approve ID`. New comments alone do not trigger a review.
 
+`cpr review ID --resolution "..."` records an explicit maintainer decision and queues rereview. The decision can resolve named repository policy or licensing findings; it is included in every review and final-validation attempt and retained in each run's history. Required notices, attribution, and remaining technical checks still apply. Acceptance is recorded as a maintainer decision, not independent verification of provenance. The current decision remains in effect for this PR until replaced; ordinary `review ID` preserves it, and `review ID --resolution ""` clears it for subsequent runs. `cpr show ID` displays both the current decision and each run's captured decision. An active automated review must finish or be cancelled before a new decision is submitted. Publication still requires separate approval.
+
 `cpr remove ID` stops tracking and records `Removed`, preserving the saved work and database history. Removed PRs leave merge ordering and GitHub polling. `cpr add URL` or `cpr review ID` resumes tracking under the same CPR ID. `cpr purge ID` stops tracking and explicitly requests deletion of all PR files, including unpublished edits; the database record and compact review history remain. Purge also retries cleanup for completed records.
 
 When GitHub reports a merge or closure, CPR records `Merged` or `Closed` with `CompletedAt` and immediately excludes that PR from merge ordering and new work. The database record remains. `cpr status` includes these terminal records and shows file cleanup as `Pending` or `Done`. Terminal records cannot be removed, reviewed, approved, or connected to through the client. If a closed PR is reopened on GitHub, `cpr add URL` queues it again under its existing CPR ID after cleanup finishes.
@@ -80,7 +83,7 @@ Use `cpr workers` to find a worker's ID, then `cpr pause 101` to stop new assign
 
 `orchestrator/` contains the .NET application. `Program.cs` hosts ASP.NET Core, `Controller/` exposes the HTTP API, and `Service/` groups queue processing, GitHub operations, SSH, and command execution.
 
-`SQL/` contains the EF Core context, entities, and persistence enums. [Create.sql](orchestrator/Create.sql) creates the `cpr` schema in your existing PostgreSQL database, its three tables (`Worker`, `PullRequest`, `ReviewRun`), indexes, and nine example workers. It also creates the `cpr_app` login and grants runtime access to those tables. `PullRequest.CompletedAt` records GitHub's merge or closure time (falling back to the time CPR observes it); `CleanedAt` records successful file cleanup. The application does not run migrations or create schema. Only the orchestrator receives the database connection. Review prompts live in application configuration.
+`SQL/` contains the EF Core context, entities, and persistence enums. [Create.sql](orchestrator/Create.sql) creates the `cpr` schema in your existing PostgreSQL database, its four tables (`Worker`, `PullRequest`, `ReviewRun`, `DiscordNotification`), indexes, and nine example workers. It also creates the `cpr_app` login and grants runtime access to those tables. `PullRequest.CompletedAt` records GitHub's merge or closure time (falling back to the time CPR observes it); `CleanedAt` records successful file cleanup. The application does not run migrations or create schema. After updating for maintainer resolutions, rerun `Create.sql` to add the nullable `PullRequest.MaintainerResolution` column before deploying the new orchestrator and client. Only the orchestrator receives the database connection. Review prompts live in application configuration.
 
 `GitStoragePath` is the orchestrator's staging directory for bare Git repositories. It fetches approved worker commits there, checks their contents, and pushes them to GitHub. The container uses `/data/git`; each PR's checkout lives at `/workspace/jobs/ID/repo` on its workspace worker. `/workspace/repo` points to the currently selected checkout.
 
@@ -100,13 +103,40 @@ Run one orchestrator instance. Public GitHub PR checkouts are supported; private
 | `POST /api/pr/{id}/purge` | Delete PR files, including edits; retain database history |
 | `POST /api/pr` | Add one PR with `{ "url": "..." }` |
 | `DELETE /api/pr/{id}` | Stop tracking; retain a Removed record and saved work |
-| `POST /api/pr/{id}/review` | Queue a rereview with fresh comments and invalidate approval |
+| `POST /api/pr/{id}/review` | Queue rereview and invalidate approval; optional `{ "resolution": "..." }` records a maintainer decision (up to 16,000 characters) |
 | `GET /api/worker` | Worker status and assignments |
 | `PUT /api/worker/{id}/status` | Set worker status with `{ "status": "Paused" }` |
 | `GET /api/pr/{id}/connection` | Saved checkout's SSH host and PR directory |
 | `POST /api/pr/{id}/connect` | Request an interactive session or CI recovery |
 | `POST /api/pr/{id}/complete` | Validate interactive edits and snapshot the validated tree |
 | `POST /api/pr/{id}/approve` | Approve the prepared changes |
+
+### Discord webhook notifications
+
+CPR can post to a text channel in your Discord server whenever a tracked PR is added or its saved status changes: queued, processing, ready for approval, waiting for CI, CI failure, waiting for merge turn, ready to merge, blocked, merged, closed, or removed. Each message includes the PR link, CPR ID, event time, and `cpr show ID`; failures include a shortened reason. Messages describe CPR's workflow, not every GitHub comment or individual check. Repeated polls of an unchanged status do not send another message. Existing records are not announced when you first enable the feature.
+
+1. Choose a regular text channel in your server for updates. Make it private if you want to limit who can read the notifications.
+2. Open **Server Settings → Integrations → Webhooks → Create Webhook**, select that channel, name the webhook (for example, **CPR**), and click **Copy Webhook URL**. [Discord's webhook guide](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks) illustrates these steps. No bot application, bot token, or Discord user ID is needed.
+3. Keep the URL private: it contains the credential that allows posting to your channel. Rerun `orchestrator/Create.sql` as the database administrator before enabling notifications; it adds the pending-delivery table and runtime grants. Merge these values into the existing `CPR` object in the ignored `orchestrator/appsettings.Private.json`:
+
+```json
+{
+  "CPR": {
+    "Discord": {
+      "IsEnabled": true,
+      "WebhookUrl": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+    }
+  }
+}
+```
+
+Use the URL exactly as copied, without query parameters or a `/github` suffix. CPR supports regular text channels; forum/media channels and thread targeting are not configured here. Startup validates that an enabled webhook is an HTTPS Discord webhook URL. Leaving the URL empty is allowed while disabled.
+
+For Compose, set `discord-enabled` and `discord-webhook-url` in your private deployment copy of `server/compose.yaml`. If upgrading an older configured copy, add the corresponding `CPR__Discord__IsEnabled` and `CPR__Discord__WebhookUrl` environment mappings from the template. Remove the previous `discord-bot-token`/`discord-user-id` settings and their environment mappings if present. Only the orchestrator receives the webhook URL. Restart the orchestrator after changing configuration.
+
+To verify delivery, enable notifications and add a PR you intend to track, or wait for a tracked PR's next status change. Pending messages are checked every five seconds. `docker compose logs --tail=100 cpr-orchestrator` reports successful deliveries and failures without logging the webhook URL or message contents. HTTP 401/403/404 stops delivery until the orchestrator is restarted: check that the webhook still exists, copy its current URL, and correct the private configuration. Pending events remain saved.
+
+Events are saved with the PR change and retried independently of reviews. Discord rate limits are respected; server/network errors retry after one minute and other request errors after fifteen minutes. CPR uses `wait=true` to confirm Discord saved the message before deleting its pending row. Restarting preserves pending delivery, and disabling stops both new events and delivery until reenabled. Pending rows store only the webhook ID, not its secret URL. Switching to a different webhook does not redirect old pending events; they remain associated with their original webhook. Moving the same webhook to another channel in Discord changes where it posts. Delivery is at least once: a timeout or crash after Discord accepts a message but before its pending row is deleted can cause a duplicate. See Discord's [webhook API](https://docs.discord.com/developers/resources/webhook#execute-webhook) and [rate-limit rules](https://docs.discord.com/developers/topics/rate-limits).
 
 ### Review configuration
 
@@ -120,19 +150,19 @@ The default is a review with GPT-6 Sol high followed by final validation with As
 
 Settings can be overridden in private JSON or Compose environment variables, for example `CPR__ReviewSteps__0__Model` or `CPR__Prompts__Resources`. A prompt override replaces that entire string while other named prompts retain their defaults. Restart the orchestrator after configuration changes. .NET configuration merges arrays by index: supplying a shorter array does not remove later defaults. Set `CPR__ReviewSteps__1__IsEnabled=false` for a single combined review and validation, and replace all existing prompt indices when changing a step's assignment. Disable unwanted steps explicitly. Routing and review policy are both configured here; there is no prompt-editing HTTP API.
 
-Each step has a time limit and a bounded number of attempts. A coherent but incomplete result receives a continuation listing the failed completion requirements and focused on its missing evidence; process failures, blockers, and unresolved relevance stop without repeatedly spending the remaining attempts. Completion requires structured coverage, consistent check results, retained evidence files, required resource measurements, and a final diff check. This gate checks the evidence contract, not the truth of every model judgment. The snapshot must match the tree validated by the final attempt. Interactive completion runs the last enabled step and uses a longer client timeout derived from that step's budget.
+Each step has a time limit and a bounded number of attempts. A coherent but incomplete result receives a continuation listing the failed completion requirements and focused on its missing evidence; process failures, blockers, and unresolved relevance stop without repeatedly spending the remaining attempts. Completion requires structured coverage, consistent check results, retained evidence files, required resource measurements, and a final diff check. This gate checks the evidence contract, not the truth of every model judgment. Codex resolves conflicts in working-tree files while its Git index remains read-only; unmerged index entries alone do not block a completed content review. The runner checks the final working-tree snapshot for conflict markers and whitespace errors before accepting the final attempt, then stages the validated contents itself. The snapshot must match the tree validated by the final attempt. Interactive completion runs the last enabled step and uses a longer client timeout derived from that step's budget.
 
 Full review files live under `/state/cpr/jobs/ID/runs/RUN/` on the worker until merge, closure, or explicit purge. Each run retains the plan, captured context, prompts, Codex events, stderr, evidence, structured results, hashes, usage, and final patch when successful. Each attempt has its own directory. `cpr show ID` reads the compact history in PostgreSQL, including each attempt's structured result, checks, findings, limitations, diff statistics, models, effort, and token usage. Attempt summaries and findings identify what each model reported. It works after file cleanup; raw evidence and patches are deleted. Input usage includes cached input tokens; no fixed prices are assumed. Usage totals are complete only when the process succeeds and every started turn reports valid usage. Interrupted or incomplete streams retain known totals as lower bounds; absent totals are unknown. Older records without an explicit completeness flag also display recorded totals as lower bounds. Results already deleted by older versions cannot be recovered. Export any raw evidence needed later before merging, closing, or purging.
 
 ## Workers
 
-`server/` contains `compose.yaml`, the worker `Dockerfile`, `sshd_config`, and `worker-instructions.md`. Compose loads the two config files from disk so they can be mounted into read-only containers. Compose uses the published orchestrator image directly and builds the Codex/Git/SSH worker image on the server. A separate worker image does not need to be pushed to a registry. The image includes stable Rust with rustfmt and Clippy, available to SSH sessions without installing components into the read-only root filesystem.
+`server/` contains `compose.yaml`, the worker `Dockerfile`, `sshd_config`, and `worker-instructions.md`. Compose loads the two config files from disk so they can be mounted into read-only containers. Compose uses the published orchestrator image directly and builds the Codex/Git/SSH worker image on the server. A separate worker image does not need to be pushed to a registry. The image includes stable Rust with rustfmt, Clippy, rustdoc, and the `wasm32-unknown-unknown` target, available to SSH sessions without installing components into the read-only root filesystem. Rebuild and recreate existing workers to pick up toolchain changes; persistent checkouts and review evidence remain in `data/`.
 
 The example has nine workers: 101–103 use GPU `0`, 104–106 use GPU `1`, and 107–109 use GPU `2`. Each worker defines its own `device_ids`; GPU indices and UUIDs are supported. Change these assignments to match the machine, or remove a worker's `deploy` block to run it without a GPU.
 
 Compose creates the SSH identities, worker Git configuration, and persistent directories under `data/`. Checkouts, Codex state, and SSH identities survive container restarts. Back up `data/` and the PostgreSQL database when moving the deployment.
 
-Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces inside Docker. Automated reviews and `cpr connect` run Codex with `workspace-write` and `sandbox_workspace_write.network_access=true`, allowing shell commands to download dependencies and access remote sources. Both launch paths also grant write access to `/state/cargo` with `--add-dir`, so Cargo can populate its persistent dependency cache. The worker root filesystem remains read-only, and GitHub publication credentials stay in the orchestrator.
+Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces inside Docker. Automated reviews and `cpr connect` run Codex with `workspace-write` and `sandbox_workspace_write.network_access=true`, allowing shell commands to download dependencies and access remote sources. Both launch paths also grant write access to `/state/cargo` with `--add-dir`, so Cargo can populate its persistent dependency cache. Worker `/tmp` permits execution so Rust doctests and temporary compiled probes can run. The worker root filesystem remains read-only, and GitHub publication credentials stay in the orchestrator.
 
 ## Client
 
@@ -150,7 +180,7 @@ Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces insi
 | `cpr resume WORKER_ID` | Make a paused worker available again |
 | `cpr add https://github.com/OWNER/REPO/pull/123` | Queue one pull request |
 | `cpr remove ID` | Untrack a PR and preserve saved work |
-| `cpr review ID` | Reassess the latest comments and require fresh approval |
+| `cpr review ID [--resolution TEXT]` | Reassess feedback, optionally record a maintainer decision, and require fresh approval |
 | `cpr checkout ID` | Copy the saved PR checkout locally |
 | `cpr connect ID` | Reserve its workspace worker and open Codex |
 | `cpr approve ID` | Approve the prepared changes for publication |

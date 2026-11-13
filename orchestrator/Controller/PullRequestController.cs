@@ -4,6 +4,7 @@ using CPR.Service.Queue;
 using CPR.Service.Review;
 using CPR.Service.SSH;
 using CPR.SQL;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 
 namespace CPR.Controller
 {
@@ -12,6 +13,7 @@ namespace CPR.Controller
 	public sealed class PullRequestController( Context tContext, QueueGate tGate, GitHubClient tGitHub, WorkerClient tWorkers, ReviewService tReviews, ReviewHistoryService tHistory, IOptions<Settings> tSettings ) : ControllerBase
 	{
 		public sealed record AddRequest( string Url );
+		public sealed record ReviewRequest( [MaxLength( 16000 )] string? Resolution );
 
 		[HttpGet( "/api/status" )]
 		public async Task<IActionResult> GetStatusAsync( CancellationToken tCancel )
@@ -158,6 +160,7 @@ namespace CPR.Controller
 				tempRequest.CleanupRequestedAt,
 				tempRequest.CleanedAt,
 				tempRequest.LastError,
+				tempRequest.MaintainerResolution,
 				NextAction = tempNext,
 				Runs = tempRuns.Select( x => new { x.WorkerId, Details = JsonSerializer.Deserialize<JsonElement>( x.Details ) } )
 			} );
@@ -166,22 +169,22 @@ namespace CPR.Controller
 		[HttpDelete( "{id:long}" )]
 		public Task<IActionResult> RemoveAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, true, false, tCancel );
+			return ReviewOrRemoveAsync( tId, true, false, null, tCancel );
 		}
 
 		[HttpPost( "{id:long}/purge" )]
 		public Task<IActionResult> PurgeAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, true, true, tCancel );
+			return ReviewOrRemoveAsync( tId, true, true, null, tCancel );
 		}
 
 		[HttpPost( "{id:long}/review" )]
-		public Task<IActionResult> ReviewAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
+		public Task<IActionResult> ReviewAsync( [FromRoute( Name = "id" )] long tId, [FromBody( EmptyBodyBehavior = EmptyBodyBehavior.Allow )] ReviewRequest? tRequest, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, false, false, tCancel );
+			return ReviewOrRemoveAsync( tId, false, false, tRequest?.Resolution, tCancel );
 		}
 
-		private async Task<IActionResult> ReviewOrRemoveAsync( long tId, bool tIsRemoved, bool tIsPurge, CancellationToken tCancel )
+		private async Task<IActionResult> ReviewOrRemoveAsync( long tId, bool tIsRemoved, bool tIsPurge, string? tResolution, CancellationToken tCancel )
 		{
 			PullRequest? tempRequest;
 			await tGate.Mutex.WaitAsync( tCancel );
@@ -282,6 +285,11 @@ namespace CPR.Controller
 						tempCurrent.CleanupRequestedAt = null;
 						tempCurrent.CleanedAt = null;
 						tempCurrent.LastError = "Rereview requested; waiting for worker";
+
+						if ( tResolution is not null )
+						{
+							tempCurrent.MaintainerResolution = string.IsNullOrWhiteSpace( tResolution ) ? null : tResolution;
+						}
 					}
 
 					await tContext.SaveChangesAsync( tCancel );

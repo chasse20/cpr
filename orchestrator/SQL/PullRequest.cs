@@ -39,6 +39,8 @@ namespace CPR.SQL
 		public string? PublishedSha { get; set; }
 		[MaxLength( 4096 )]
 		public string? LastError { get; set; }
+		[MaxLength( 16000 )]
+		public string? MaintainerResolution { get; set; }
 		public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 		public DateTimeOffset? CompletedAt { get; set; }
 		public DateTimeOffset? CleanupRequestedAt { get; set; }

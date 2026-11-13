@@ -10,10 +10,11 @@ RUN npm install -g @openai/codex
 RUN usermod -l coder -d /state/home/coder -s /bin/bash -p '*' node && \
     mkdir -p /etc/cpr/keys /run/sshd
 RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup.sh && \
-    sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable --component rustfmt --component clippy && \
+    sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable --component rustfmt --component clippy --target wasm32-unknown-unknown && \
     rm /tmp/rustup.sh && \
     ln -s /opt/cargo/bin/cargo /usr/local/bin/cargo && \
     ln -s /opt/cargo/bin/rustc /usr/local/bin/rustc && \
+    ln -s /opt/cargo/bin/rustdoc /usr/local/bin/rustdoc && \
     ln -s /opt/cargo/bin/rustup /usr/local/bin/rustup && \
     ln -s /opt/cargo/bin/cargo-fmt /usr/local/bin/cargo-fmt && \
     ln -s /opt/cargo/bin/rustfmt /usr/local/bin/rustfmt && \
