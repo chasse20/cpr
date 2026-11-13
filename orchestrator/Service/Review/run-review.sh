@@ -94,6 +94,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 test ! -f "$JOB/cancel-$operation" || exit 130
 
+# Compile the completion gate before spending a review attempt
+jq --argjson is_final true -f "$RUN/validate-result.jq" /dev/null
+
 fingerprint() {
   GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" read-tree HEAD
   GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" add -A

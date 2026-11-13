@@ -18,32 +18,32 @@ require(type == "object"; "Result must be an object")
 	issue(.relevance.evidence | text; "relevance.evidence must support the relevance decision"),
 	issue(.relevance.related_prs | type == "array"; "relevance.related_prs must be an array"),
 	issue([.checks[].id] | length == (unique | length); "checks must have unique IDs"),
-	(.checks | to_entries[] | .key as $index | .value | "checks[\($index)] (\(.id // "missing ID"))" as $label |
-		issue(.id | text; "\($label).id must be nonempty"),
-		issue(.command | text; "\($label).command must identify the actual command"),
-		issue(.details | text; "\($label).details must explain the result"),
-		issue(.status | IN("passed", "failed", "blocked", "not_run"); "\($label).status must be passed, failed, blocked, or not_run"),
-		issue(.is_required | type == "boolean"; "\($label).is_required must be a boolean"),
-		issue(.is_baseline_failure | type == "boolean"; "\($label).is_baseline_failure must be a boolean"),
-		issue(.artifact | type == "string"; "\($label).artifact must be a relative evidence path or an empty string"),
+	(.checks | to_entries[] | .key as $index | .value | "checks[\($index)] (\(.id // "missing ID"))" as $context_name |
+		issue(.id | text; "\($context_name).id must be nonempty"),
+		issue(.command | text; "\($context_name).command must identify the actual command"),
+		issue(.details | text; "\($context_name).details must explain the result"),
+		issue(.status | IN("passed", "failed", "blocked", "not_run"); "\($context_name).status must be passed, failed, blocked, or not_run"),
+		issue(.is_required | type == "boolean"; "\($context_name).is_required must be a boolean"),
+		issue(.is_baseline_failure | type == "boolean"; "\($context_name).is_baseline_failure must be a boolean"),
+		issue(.artifact | type == "string"; "\($context_name).artifact must be a relative evidence path or an empty string"),
 		(if .status == "passed" then
-			issue(.exit_code == 0; "\($label): passed checks require exit_code 0"),
-			issue(.artifact | text; "\($label): passed checks require a retained evidence artifact")
+			issue(.exit_code == 0; "\($context_name): passed checks require exit_code 0"),
+			issue(.artifact | text; "\($context_name): passed checks require a retained evidence artifact")
 		elif .status == "failed" then
-			issue(.exit_code | type == "number" and . != 0; "\($label): failed checks require a nonzero exit_code")
-		else issue(.exit_code == null; "\($label): blocked or unrun checks require a null exit_code") end),
+			issue(.exit_code | type == "number" and . != 0; "\($context_name): failed checks require a nonzero exit_code")
+		else issue(.exit_code == null; "\($context_name): blocked or unrun checks require a null exit_code") end),
 		issue(.is_required != true or .status == "passed" or (.status == "failed" and .is_baseline_failure == true and (.artifact | text));
-			"\($label): required checks must pass or retain evidence of a demonstrated baseline failure")),
+			"\($context_name): required checks must pass or retain evidence of a demonstrated baseline failure")),
 	issue(.coverage | keys == ["cleanup", "correctness", "final_diff", "resources"]; "coverage must contain correctness, resources, cleanup, and final_diff"),
-	(.coverage | to_entries[] | "coverage.\(.key)" as $label | .value |
-		issue(.details | text; "\($label).details must explain the assessment"),
-		issue(.status | IN("verified", "inspected", "not_applicable", "incomplete"); "\($label).status must be verified, inspected, not_applicable, or incomplete"),
-		(.checks[] | . as $id | issue(any($result.checks[]; .id == $id); "\($label) references unknown check \($id)")),
+	(.coverage | to_entries[] | "coverage.\(.key)" as $context_name | .value |
+		issue(.details | text; "\($context_name).details must explain the assessment"),
+		issue(.status | IN("verified", "inspected", "not_applicable", "incomplete"); "\($context_name).status must be verified, inspected, not_applicable, or incomplete"),
+		(.checks[] | . as $id | issue(any($result.checks[]; .id == $id); "\($context_name) references unknown check \($id)")),
 		(if .status == "verified" then
-			issue(.checks | length > 0; "\($label): verified coverage requires check IDs"),
-			(.checks[] | . as $id | issue(any($result.checks[]; .id == $id and .status == "passed"); "\($label): check \($id) must pass to support verified coverage"))
+			issue(.checks | length > 0; "\($context_name): verified coverage requires check IDs"),
+			(.checks[] | . as $id | issue(any($result.checks[]; .id == $id and .status == "passed"); "\($context_name): check \($id) must pass to support verified coverage"))
 		else empty end),
-		(if $is_final then issue(.status != "incomplete"; "\($label) is incomplete; complete the missing required work before final validation") else empty end)),
+		(if $is_final then issue(.status != "incomplete"; "\($context_name) is incomplete; complete the missing required work before final validation") else empty end)),
 	issue(.is_resource_measurement_required | type == "boolean"; "is_resource_measurement_required must be a boolean"),
 	(if $is_final then
 		issue(.coverage.final_diff.status == "verified"; "coverage.final_diff must be verified with retained final-diff evidence"),
