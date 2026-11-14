@@ -36,8 +36,6 @@ tempBuilder.Services.AddDbContextPool<Context>
 	{
 		string tempConnection = tempBuilder.Configuration.GetConnectionString( "CPR" ) ?? throw new InvalidOperationException( "Set ConnectionStrings:CPR in appsettings.Private.json or ConnectionStrings__CPR in the environment" );
 
-		tOptions.AddInterceptors( new DiscordNotificationInterceptor( tempSettings.Discord ) );
-
 		tOptions.UseNpgsql
 		(
 			tempConnection,
