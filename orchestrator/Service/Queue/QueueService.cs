@@ -200,7 +200,7 @@ namespace CPR.Service.Queue
 				}
 				else if ( !WorkflowRules.IsSameSource( tempRequest, tempSnapshot ) || ( tempRequest.Status == PullRequestStatus.ReadyForApproval && tempRequest.ReviewedTargetSha != tempSnapshot.TargetSha ) )
 				{
-					WorkflowRules.Block( tempRequest, "PR head or target changed since review; run cpr review to reassess the latest revision" );
+					WorkflowRules.Block( tempRequest, "PR head or target changed since review; use cpr connect --tweak for manual target integration, or cpr review to reassess" );
 				}
 
 				if ( tempRequest.Status is PullRequestStatus.WaitingForCi or PullRequestStatus.CiFailure or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged )
@@ -322,7 +322,7 @@ namespace CPR.Service.Queue
 				List<Worker> tempFree = await tempContext.Worker.Where( x => x.Status == WorkerStatus.Online && x.PullRequest == null ).OrderBy( x => x.WorkerId ).ToListAsync( tCancel );
 				List<PullRequest> tempJobs = await tempContext.PullRequest
 					.Where( x => x.WorkerId == null && ( x.Status == PullRequestStatus.WaitingToBeProcessed || ( _settings.IsPublicationEnabled && x.Status == PullRequestStatus.ReadyForApproval && x.ApprovedSha != null ) ) )
-					.OrderBy( x => x.ApprovedSha != null ? 0 : x.WorkReason == PullRequestWorkReason.Interactive || x.WorkReason == PullRequestWorkReason.CiRecovery || x.WorkReason == PullRequestWorkReason.Rereview ? 1 : x.WorkReason == PullRequestWorkReason.MergeConflict ? 2 : 3 )
+					.OrderBy( x => x.ApprovedSha != null ? 0 : x.WorkReason == PullRequestWorkReason.ManualTweak || x.WorkReason == PullRequestWorkReason.Interactive || x.WorkReason == PullRequestWorkReason.CiRecovery || x.WorkReason == PullRequestWorkReason.Rereview ? 1 : x.WorkReason == PullRequestWorkReason.MergeConflict ? 2 : 3 )
 					.ThenBy( x => x.PullRequestId ).ToListAsync( tCancel );
 				List<PullRequest> tempReviews = [];
 
@@ -404,7 +404,7 @@ namespace CPR.Service.Queue
 					return;
 				}
 
-				if ( tempRequest.WorkReason is PullRequestWorkReason.CiRecovery or PullRequestWorkReason.Interactive )
+				if ( tempRequest.WorkReason is PullRequestWorkReason.CiRecovery or PullRequestWorkReason.Interactive or PullRequestWorkReason.ManualTweak )
 				{
 					// Interactive work starts only after cpr connect
 					await tWorkers.PrepareInteractiveAsync( tempWorker, tempRequest, tCancel );

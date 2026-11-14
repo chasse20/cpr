@@ -38,10 +38,20 @@ namespace CPR.Service.SSH
 
 		public async Task<string?> PrepareInteractiveAsync( Worker tWorker, PullRequest tRequest, CancellationToken tCancel )
 		{
-			string tempOutput = await RunAsync( tWorker, tRequest, "prepare", PREPARE_COMMANDS + "\nif test -s \"$JOB/session-id\"; then printf 'CPR_SESSION|%s\\n' \"$(cat \"$JOB/session-id\")\"; fi", tCancel: tCancel );
+			string tempPreserve = tRequest.WorkReason == PullRequestWorkReason.ManualTweak ? "is_preserved=1\n" : "";
+			string tempOutput = await RunAsync( tWorker, tRequest, "prepare", tempPreserve + PREPARE_COMMANDS + "\nif test -s \"$JOB/session-id\"; then printf 'CPR_SESSION|%s\\n' \"$(cat \"$JOB/session-id\")\"; fi", tCancel: tCancel );
 			string? tempSession = tempOutput.Split( '\n' ).LastOrDefault( x => x.StartsWith( "CPR_SESSION|", StringComparison.Ordinal ) )?[ "CPR_SESSION|".Length.. ].Trim();
 
 			return tempSession is not null && Regex.IsMatch( tempSession, "^[A-Za-z0-9_-]{6,128}$" ) ? tempSession : null;
+		}
+
+		public async Task<WorkerSnapshot> CompleteTweakAsync( Worker tWorker, PullRequest tRequest, string tTargetSha, CancellationToken tCancel )
+		{
+			string tempCommands = $"is_preserved=1\n{PREPARE_COMMANDS}\n{ReadResource( "complete-tweak.sh" )}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}";
+			string tempData = JsonSerializer.Serialize( new { HeadSha = tRequest.RemoteSha, TargetSha = tTargetSha, tRequest.MaintainerResolution } );
+			string tempOutput = await RunAsync( tWorker, tRequest, "manual-tweak", tempCommands, tempData, 180, tCancel );
+
+			return ParseSnapshot( tempOutput );
 		}
 
 		public async Task<string> CommitApprovedAsync( Worker tWorker, PullRequest tRequest, CancellationToken tCancel )

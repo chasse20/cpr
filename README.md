@@ -69,6 +69,10 @@ After a confirmed approved publication, CPR posts the saved comment with the pub
 
 `cpr review ID` requests another AI review, including after approval or publication. It clears pending approval, fetches the latest comments when the worker starts, and explicitly reassesses new or unresolved feedback. Saved unpublished work stays on its workspace worker, and the review resumes its Codex session when available. After publication, a new checkout uses the current PR head. Successful rereview returns to `ReadyForApproval` and releases the worker; publishing requires another `cpr approve ID`. New comments alone do not trigger a review.
 
+`cpr connect ID --tweak` opens the saved Codex session for manual edits or target integration, without automated review on exit. Use it when other PRs landed while a review was running and you want to handle the merge yourself. It reserves the saved workspace's worker, preserving its edits and pending merge; if the worker is busy, run the command again once assigned. The session allows local Git staging and commits in the worker container, so you can finish the old merge, fetch the current target, and merge it without repeating the full review. Codex waits for your instructions, with the existing repairs and maintainer decisions retained. Manual sessions use Codex's `danger-full-access` sandbox setting so Git metadata is writable.
+
+On successful exit, CPR performs Git checks only: the checkout must retain the recorded history and PR head, include the latest target in its commits or pending merge, have resolved conflicts, and pass whitespace and sensitive-filename checks. CPR saves a new tree and a report explicitly labeled **manual tweaks**, then releases the worker. It does not run an AI review or test suite, renew prior review coverage, push a branch, or merge the GitHub PR. Inspect `cpr show ID` and `cpr show ID --comment`, then use the separate `cpr approve ID` to publish. GitHub merging remains separate. If completion fails or the target moves again, saved work remains available through `cpr connect ID --tweak`. A changed PR head or destination requires rereview. Updating the client and orchestrator enables this command; no schema change is needed.
+
 `cpr review ID --resolution "..."` records an explicit maintainer decision and queues rereview. The decision can resolve named repository policy or licensing findings; it is included in every review and final-validation attempt and retained in each run's history. Required notices, attribution, and remaining technical checks still apply. Acceptance is recorded as a maintainer decision, not independent verification of provenance. The current decision remains in effect for this PR until replaced; ordinary `review ID` preserves it, and `review ID --resolution ""` clears it for subsequent runs. `cpr show ID` displays both the current decision and each run's captured decision. An active automated review must finish or be cancelled before a new decision is submitted. Publication still requires separate approval.
 
 `cpr remove ID` stops tracking and records `Removed`, preserving the saved work and database history. Removed PRs leave merge ordering and GitHub polling. `cpr add URL` or `cpr review ID` resumes tracking under the same CPR ID. `cpr purge ID` stops tracking and explicitly requests deletion of all PR files, including unpublished edits; the database record and compact review history remain. Purge also retries cleanup for completed records.
@@ -113,8 +117,8 @@ Run one orchestrator instance. Public GitHub PR checkouts are supported; private
 | `GET /api/worker` | Worker status and assignments |
 | `PUT /api/worker/{id}/status` | Set worker status with `{ "status": "Paused" }` |
 | `GET /api/pr/{id}/connection` | Saved checkout's SSH host and PR directory |
-| `POST /api/pr/{id}/connect` | Request an interactive session or CI recovery |
-| `POST /api/pr/{id}/complete` | Validate interactive edits and snapshot the validated tree |
+| `POST /api/pr/{id}/connect` | Request an interactive session or CI recovery; `?tweak=true` selects manual tweak completion on the saved workspace |
+| `POST /api/pr/{id}/complete` | Complete the selected session: AI validation for connect, Git checks only for manual tweaks with `?tweak=true`; rejects a mismatched session mode |
 | `POST /api/pr/{id}/approve` | Approve the prepared changes |
 
 ### Discord webhook notifications
@@ -191,6 +195,7 @@ Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces insi
 | `cpr review ID [--resolution TEXT]` | Reassess feedback, optionally record a maintainer decision, and require fresh approval |
 | `cpr checkout ID` | Copy the saved PR checkout locally |
 | `cpr connect ID` | Reserve its workspace worker and open Codex |
+| `cpr connect ID --tweak` | Open saved Codex for local target integration; save without automated review or publication |
 | `cpr approve ID` | Approve the prepared changes for publication |
 
 Use the CPR ID from `status` for commands that take `ID`. Worker commands use the ID from `workers`.
@@ -262,7 +267,7 @@ CPR_CHECKOUT_DIR=~/.local/share/cpr/checkouts
 CPR_HTTP_TIMEOUT=120
 ```
 
-These settings control the API address, local checkout directory, and ordinary HTTP timeout in seconds. Final validation after `connect` uses the server's review budget instead. Use plain `KEY=value` lines without quotes or shell expressions. This file is the client's only configuration source; there are no command-line or environment-variable overrides.
+These settings control the API address, local checkout directory, and ordinary HTTP timeout in seconds. Final validation after `connect` uses the server's review budget instead; manual completion after `connect --tweak` has a ten-minute HTTP timeout. Use plain `KEY=value` lines without quotes or shell expressions. This file is the client's only configuration source; there are no command-line or environment-variable overrides.
 
 ### SSH
 
