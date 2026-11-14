@@ -8,6 +8,7 @@
 		"- **\(.severity) / \(.status)** — \(.location) (\(.origin))\n  Trigger: \(.trigger)\n  Expected: \(.expected)\n  Actual: \(.actual)\n  Impact: \(.impact)\n  Evidence: \(.evidence)\n  Repair: \(.repair)") end),
 "\n## Coverage\n",
 (.coverage | to_entries[] | "- **\(.key): \(.value.status)** — \(.value.details)"),
+(if (.scope_audit // "") != "" then "\nScope audit: \(.scope_audit)" else empty end),
 "\n## Checks\n",
 (.checks[] | "- **\(.status)** `\(.command)` — \(.details)\n  Artifact: \(.artifact)"),
 "\n## Limitations\n",

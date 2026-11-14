@@ -23,6 +23,9 @@ CPR_RESULT_VALIDATION
 cat > "$RUN/report-result.jq" <<'CPR_RESULT_REPORT'
 {{ResultReport}}
 CPR_RESULT_REPORT
+cat > "$RUN/validate-scope.jq" <<'CPR_SCOPE_VALIDATION'
+{{ScopeValidation}}
+CPR_SCOPE_VALIDATION
 
 jq -n --argjson id "$ID" --arg url "$(decode "$URL64")" --arg started "$(date -u +%FT%TZ)" \
   --arg scratch "$SCRATCH" --arg version "$(codex --version)" --slurpfile plan "$RUN/plan.json" \
@@ -96,11 +99,32 @@ test ! -f "$JOB/cancel-$operation" || exit 130
 
 # Compile the completion gate before spending a review attempt
 jq --argjson is_final true --argjson is_commit_required true -f "$RUN/validate-result.jq" /dev/null
+jq --argjson scope '[]' --argjson result '[]' -f "$RUN/validate-scope.jq" /dev/null
 
 fingerprint() {
   GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" read-tree HEAD
   GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" add -A
   GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" write-tree
+}
+
+write_review_scope() {
+  local tree="$1" destination="$2"
+  git -C "$ROOT" diff --no-renames --name-only -z "$head_sha" "$tree" > "$RUN/working-tree-paths"
+  jq -n --arg base "$comparison_sha" --arg head "$head_sha" --arg target "$target_sha" \
+    --slurpfile original "$RUN/original-pr-paths.json" --rawfile changed "$RUN/working-tree-paths" '
+    ($changed | split("\u0000") | map(select(length > 0))) as $paths |
+    {comparison_base_sha: $base, head_sha: $head, target_sha: $target,
+      original_pr_paths: $original[0], working_tree_paths: $paths,
+      required_paths: (($original[0] + $paths) | unique)}' > "$destination"
+}
+
+check_scope() {
+  if test "$is_final" = true; then
+    local audit
+    audit="$(jq -r '.scope_audit' "$ATTEMPT/result.json")"
+    jq -e --slurpfile scope "$ATTEMPT/output-scope.json" --slurpfile result "$ATTEMPT/result.json" \
+      -f "$RUN/validate-scope.jq" "$SCRATCH/$audit"
+  fi
 }
 
 check_worktree() {
@@ -117,7 +141,7 @@ check_artifacts() {
       resolved="$(realpath -e -- "$SCRATCH/$artifact")" || return 1
       [[ "$resolved" == "$SCRATCH/evidence/"* && "$resolved" == "$SCRATCH/$artifact" ]] && test -f "$resolved" || { echo "Evidence must be a regular file at its canonical path: $artifact"; return 1; }
     fi
-  done < <(jq -r '.checks[].artifact' "$ATTEMPT/result.json")
+  done < <(jq -r '.checks[].artifact, (.scope_audit // empty)' "$ATTEMPT/result.json")
 }
 
 is_validation_only="$(jq -r '.IsValidationOnly' "$RUN/plan.json")"
@@ -151,6 +175,8 @@ fi
 [[ -z "$session" || "$session" =~ ^[A-Za-z0-9_-]{6,128}$ ]] || { echo 'Invalid saved Codex session' >&2; exit 6; }
 integration_sha="$(cat "$JOB/target-sha" 2>/dev/null || true)"
 comparison_sha="$(git -C "$ROOT" merge-base "$head_sha" "$target_sha")"
+git -C "$ROOT" diff --no-renames --name-only -z "$comparison_sha" "$head_sha" > "$RUN/original-pr-paths"
+jq -Rs 'split("\u0000") | map(select(length > 0))' "$RUN/original-pr-paths" > "$RUN/original-pr-paths.json"
 jq --arg head "$head_sha" --arg target "$target_sha" --arg base "$comparison_sha" --arg integration "$integration_sha" \
   '.head_sha = $head | .target_sha = $target | .comparison_base_sha = $base | .integration_target_sha = $integration' "$RUN/manifest.json" > "$RUN/manifest.tmp"
 mv "$RUN/manifest.tmp" "$RUN/manifest.json"
@@ -171,6 +197,8 @@ for ((step=0; step<step_count; ++step)); do
     ATTEMPT="$RUN/$step-$name-$attempt"
     mkdir -p "$ATTEMPT"
     input_tree="$(fingerprint)"
+    write_review_scope "$input_tree" "$ATTEMPT/input-scope.json"
+    cp "$ATTEMPT/input-scope.json" "$SCRATCH/review-scope.json"
     started="$(date -u +%FT%TZ)"
     jq -r --argjson step "$step" '.Steps[$step].Prompt' "$RUN/plan.json" > "$ATTEMPT/prompt.txt"
     if jq -e '.MaintainerResolution != null and .MaintainerResolution != ""' "$RUN/plan.json" >/dev/null; then
@@ -180,9 +208,10 @@ for ((step=0; step<step_count; ++step)); do
     cat >> "$ATTEMPT/prompt.txt" <<CPR_REVIEW_CONTEXT
 
 CPR execution facts:
-- Assigned step: $name; final step: $is_final; validation of existing edits only: $is_validation_only
+- Assigned step: $name; final step: $is_final; completing an interactive session: $is_validation_only
 - PR: $(decode "$URL64"); target branch: $TARGET; checkout: $ROOT
 - Original head: $head_sha; current target: $target_sha; comparison base: $comparison_sha; previously integrated target (empty if none): $integration_sha
+- Read $SCRATCH/review-scope.json for the original PR paths and subsequent changes. Full original PR scope remains required during rereview and interactive completion; git diff HEAD alone omits already-committed PR code. Complete missing cleanup, optimization, and memory work, including repairs needed during validation. Account for every required path in scope_audit and include paths added by your repairs.
 - Read $SCRATCH/context.json for captured PR discussion, linked issues, and related PRs. Paginated comment collections contain arrays of pages. Other linked references may require further investigation; report unavailable context explicitly.
 - Previous run (empty if none): $previous_run. Its artifacts and results are read-only historical evidence. Reuse only evidence still valid for the current tree; copy reused evidence into the current evidence directory and update its references.
 - Previous checkout archived when upstream changed (empty if none): $(cat "$JOB/previous-workspace" 2>/dev/null || true). Inspect its unpublished repairs and reapply only those still relevant; preserve the archive.
@@ -226,6 +255,7 @@ CPR_REVIEW_CONTEXT
     fi
     record_usage "$exit_code"
     output_tree="$(fingerprint)"
+    write_review_scope "$output_tree" "$ATTEMPT/output-scope.json"
     jq --arg session "$session" --arg output "$output_tree" --arg ended "$(date -u +%FT%TZ)" \
       --argjson code "$exit_code" --slurpfile usage "$ATTEMPT/usage.json" \
       '.session_id = $session | .output_tree = $output | .completed_at = $ended | .exit_code = $code | .usage = $usage[0] | .status = (if $code == 0 then "executed" else "failed" end)' \
@@ -239,7 +269,7 @@ CPR_REVIEW_CONTEXT
     is_commit_required=false
     if test "$output_tree" != "$(git -C "$ROOT" rev-parse HEAD^{tree})" || test -f "$ROOT/.git/MERGE_HEAD"; then is_commit_required=true; fi
     if jq -e --argjson is_final "$is_final" --argjson is_commit_required "$is_commit_required" -f "$RUN/validate-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/gate.txt" 2>&1 &&
-       check_artifacts >> "$ATTEMPT/gate.txt" 2>&1 && check_worktree >> "$ATTEMPT/gate.txt" 2>&1; then
+       check_artifacts >> "$ATTEMPT/gate.txt" 2>&1 && check_scope >> "$ATTEMPT/gate.txt" 2>&1 && check_worktree >> "$ATTEMPT/gate.txt" 2>&1; then
       is_complete=true
     else
       printf '\nCompletion requires coherent check results, retained evidence, and all required final coverage.\n' >> "$ATTEMPT/gate.txt"

@@ -27,7 +27,8 @@ namespace CPR.Service.SSH
 			string tempReview = ReadResource( "run-review.sh" )
 				.Replace( "{{ResultSchema}}", ReadResource( "result.schema.json" ), StringComparison.Ordinal )
 				.Replace( "{{ResultValidation}}", ReadResource( "commit-message.jq" ) + "\n" + ReadResource( "validate-result.jq" ), StringComparison.Ordinal )
-				.Replace( "{{ResultReport}}", ReadResource( "report-result.jq" ), StringComparison.Ordinal );
+				.Replace( "{{ResultReport}}", ReadResource( "report-result.jq" ), StringComparison.Ordinal )
+				.Replace( "{{ScopeValidation}}", ReadResource( "validate-scope.jq" ), StringComparison.Ordinal );
 			string tempCommands = $"is_review={( tPlan.IsValidationOnly ? 0 : 1 )}\n{PREPARE_COMMANDS}\n{tempReview}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}";
 			int tempTimeout = tPlan.Steps.Sum( x => ( x.TimeoutSeconds + 15 ) * x.MaxAttempts ) + 600;
 			string tempOutput = await RunAsync( tWorker, tRequest, "run", tempCommands, JsonSerializer.Serialize( tPlan ), tempTimeout, tCancel );
@@ -221,7 +222,7 @@ namespace CPR.Service.SSH
 			is_stale=0
 			if test "${is_review:-0}" = 1 && test -d "$stored/.git"; then
 			  expected_head="$(decode "$DATA64" | jq -r '.HeadSha')"
-			  expected_target="$(decode "$DATA64" | jq -r '.Context.PullRequest.base.sha')"
+			  expected_target="$(decode "$DATA64" | jq -er '.Context.TargetSha')"
 			  if test "$(git -C "$stored" rev-parse HEAD)" != "$expected_head" ||
 			     { test -s "$JOB/target-sha" && test "$(cat "$JOB/target-sha")" != "$expected_target"; } ||
 			     { test -s "$JOB/target-branch" && test "$(cat "$JOB/target-branch")" != "$TARGET"; }; then
