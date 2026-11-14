@@ -163,6 +163,7 @@ case "$command_name" in
           (.result // {} | (.summary // .capture_error // empty | "    Result: " + .),
             (.findings[]? | "    Finding [\(.severity)] \(.location): \(.impact)"))),
         (.result // {} | .summary // empty,
+          (if (.commit_message // "") != "" then "Proposed commit:\n" + .commit_message else empty end),
           ((.coverage // {}) | to_entries[] | "Coverage [\(.key)]: \(.value.status) — \(.value.details)"),
           (if .relevance != null then "Relevance: \(.relevance.status) — \(.relevance.details)" else empty end),
           (.findings[]? | "Finding [\(.severity)] \(.location): \(.impact)\n  Repair: \(.repair)"),

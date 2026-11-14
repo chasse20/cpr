@@ -1,4 +1,5 @@
 "# CPR review\n\n**\(.outcome)**\n\n" + .summary,
+(if (.commit_message // "") != "" then "\n## Proposed commit\n\n" + (.commit_message | split("\n") | map("> " + .) | join("\n")) else empty end),
 "\n## Relevance\n\n**\(.relevance.status)** — \(.relevance.details)\n\nEvidence: \(.relevance.evidence)",
 (.relevance.related_prs[] | "- " + .),
 "\n## Findings\n",

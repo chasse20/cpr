@@ -95,7 +95,7 @@ trap 'exit 143' TERM HUP
 test ! -f "$JOB/cancel-$operation" || exit 130
 
 # Compile the completion gate before spending a review attempt
-jq --argjson is_final true -f "$RUN/validate-result.jq" /dev/null
+jq --argjson is_final true --argjson is_commit_required true -f "$RUN/validate-result.jq" /dev/null
 
 fingerprint() {
   GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" read-tree HEAD
@@ -236,7 +236,9 @@ CPR_REVIEW_CONTEXT
     jq -r -f "$RUN/report-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/report.md"
     cp "$ATTEMPT/report.md" "$JOB/report.md"
 
-    if jq -e --argjson is_final "$is_final" -f "$RUN/validate-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/gate.txt" 2>&1 &&
+    is_commit_required=false
+    if test "$output_tree" != "$(git -C "$ROOT" rev-parse HEAD^{tree})" || test -f "$ROOT/.git/MERGE_HEAD"; then is_commit_required=true; fi
+    if jq -e --argjson is_final "$is_final" --argjson is_commit_required "$is_commit_required" -f "$RUN/validate-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/gate.txt" 2>&1 &&
        check_artifacts >> "$ATTEMPT/gate.txt" 2>&1 && check_worktree >> "$ATTEMPT/gate.txt" 2>&1; then
       is_complete=true
     else
