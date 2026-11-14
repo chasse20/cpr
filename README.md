@@ -156,6 +156,8 @@ The example has nine workers: 101–103 use GPU `0`, 104–106 use GPU `1`, and 
 
 Compose creates the SSH identities, worker Git configuration, and persistent directories under `data/`. Checkouts, Codex state, and SSH identities survive container restarts. Back up `data/` and the PostgreSQL database when moving the deployment.
 
+Workers retain `AUDIT_WRITE` so sshd can record interactive logins. Without it, `cpr connect` closes before Codex starts and worker logs report `linux_audit_write_entry failed: Operation not permitted`. After adding this capability to an existing deployment, recreate idle workers with `docker compose up -d --no-deps w101 w102 w103` (adjust the worker names for your deployment).
+
 Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces inside Docker. Automated reviews and `cpr connect` run Codex with `workspace-write` and `sandbox_workspace_write.network_access=true`, allowing shell commands to download dependencies and access remote sources. Both launch paths also grant write access to `/state/cargo` with `--add-dir`, so Cargo can populate its persistent dependency cache. Worker `/tmp` permits execution so Rust doctests and temporary compiled probes can run. The worker root filesystem remains read-only, and GitHub publication credentials stay in the orchestrator.
 
 ## Client

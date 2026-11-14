@@ -30,7 +30,8 @@ x-worker: &worker
   stdin_open: true
   tty: true
   cap_drop: [ALL]
-  cap_add: [SETUID, SETGID, CHOWN, SYS_CHROOT, DAC_OVERRIDE]
+  # sshd must be able to record interactive logins in the Linux audit log
+  cap_add: [SETUID, SETGID, CHOWN, SYS_CHROOT, DAC_OVERRIDE, AUDIT_WRITE]
   # Allow Codex to create its sandbox namespaces inside the worker
   security_opt: ['no-new-privileges:true', 'seccomp=unconfined']
   pids_limit: 2048
