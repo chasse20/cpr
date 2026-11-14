@@ -1,9 +1,11 @@
+using CPR.Service.Discord;
 using CPR.Service.Review;
 
 namespace CPR.Service
 {
 	public sealed record Settings
 	{
+		public DiscordSettings Discord { get; set; } = new();
 		public int PollSeconds { get; set; } = 60;
 		public bool IsWorkerExecutionEnabled { get; set; }
 		public bool IsPublicationEnabled { get; set; }

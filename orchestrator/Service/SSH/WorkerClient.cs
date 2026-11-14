@@ -26,7 +26,7 @@ namespace CPR.Service.SSH
 		{
 			string tempReview = ReadResource( "run-review.sh" )
 				.Replace( "{{ResultSchema}}", ReadResource( "result.schema.json" ), StringComparison.Ordinal )
-				.Replace( "{{ResultValidation}}", ReadResource( "validate-result.jq" ), StringComparison.Ordinal )
+				.Replace( "{{ResultValidation}}", ReadResource( "commit-message.jq" ) + "\n" + ReadResource( "validate-result.jq" ), StringComparison.Ordinal )
 				.Replace( "{{ResultReport}}", ReadResource( "report-result.jq" ), StringComparison.Ordinal );
 			string tempCommands = $"is_review={( tPlan.IsValidationOnly ? 0 : 1 )}\n{PREPARE_COMMANDS}\n{tempReview}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}";
 			int tempTimeout = tPlan.Steps.Sum( x => ( x.TimeoutSeconds + 15 ) * x.MaxAttempts ) + 600;
@@ -45,7 +45,8 @@ namespace CPR.Service.SSH
 
 		public async Task<string> CommitApprovedAsync( Worker tWorker, PullRequest tRequest, CancellationToken tCancel )
 		{
-			string tempOutput = await RunAsync( tWorker, tRequest, "commit", $"is_preserved=1\n{PREPARE_COMMANDS}\n{COMMIT_COMMANDS}", tRequest.ApprovedSha ?? "", tCancel: tCancel );
+			string tempCommit = COMMIT_COMMANDS.Replace( "{{CommitMessageValidation}}", ReadResource( "commit-message.jq" ), StringComparison.Ordinal );
+			string tempOutput = await RunAsync( tWorker, tRequest, "commit", $"is_preserved=1\n{PREPARE_COMMANDS}\n{tempCommit}", tRequest.ApprovedSha ?? "", tCancel: tCancel );
 			string tempLine = tempOutput.Split( '\n' ).LastOrDefault( x => x.StartsWith( "CPR_COMMIT|", StringComparison.Ordinal ) ) ?? throw new InvalidOperationException( "Missing worker commit SHA" );
 			string tempSha = tempLine.Trim()[ "CPR_COMMIT|".Length.. ];
 
@@ -266,7 +267,7 @@ namespace CPR.Service.SSH
 			printf '%s\n' "$url" > "$JOB/url"
 			if test "$is_new" = 1; then
 			  git -C "$ROOT" rev-parse HEAD > "$JOB/base-sha"
-			  rm -f "$JOB/tree" "$JOB/session-id" "$JOB/target-sha" "$JOB/published"
+			  rm -f "$JOB/tree" "$JOB/session-id" "$JOB/target-sha" "$JOB/published" "$JOB/commit.json" "$JOB/commit-message.txt"
 			  printf '%s\n' "$TARGET" > "$JOB/target-branch"
 			fi
 			test -s "$JOB/base-sha" || { echo 'Incomplete checkout preparation; preserve workspace for inspection' >&2; exit 5; }
@@ -288,6 +289,9 @@ namespace CPR.Service.SSH
 			git -C "$ROOT" diff --cached --check
 			tree="$(git -C "$ROOT" write-tree)"
 			test "$tree" = "$review_tree" || { echo 'Snapshot differs from the validated tree; review again' >&2; exit 13; }
+			# Keep the proposed message tied to the exact reviewed tree
+			jq --arg tree "$tree" '{tree: $tree, commit_message: .commit_message}' "$RUN/result.json" > "$JOB/commit.json.tmp"
+			mv "$JOB/commit.json.tmp" "$JOB/commit.json"
 			cp "$RUN/report.md" "$JOB/report.md"
 			printf '%s\n' "$tree" > "$JOB/tree"
 			printf 'CPR_RESULT|%s|%s|%s\n' "$tree" "$session" "$target_sha"
@@ -311,12 +315,18 @@ namespace CPR.Service.SSH
 			test -n "$user_name" && test -n "$user_email" || exit 2
 			git -C "$ROOT" config user.name "$user_name"
 			git -C "$ROOT" config user.email "$user_email"
-			git -C "$ROOT" -c user.name="$user_name" -c user.email="$user_email" \
-			  commit -m "CPR review #$ID" >/dev/null || {
-			    # A no-change PR keeps its existing commit; an unfinished merge must not be published
-			    test ! -f "$ROOT/.git/MERGE_HEAD" || exit 10
-			    test "$(git -C "$ROOT" rev-parse HEAD^{tree})" = "$expected" || exit 10
+			# A no-change PR keeps its existing commit; target integration still needs a merge commit
+			if test "$(git -C "$ROOT" rev-parse HEAD^{tree})" != "$expected" || test -f "$ROOT/.git/MERGE_HEAD"; then
+			  jq -er --arg tree "$expected" '
+			{{CommitMessageValidation}}
+			    if .tree == $tree and (.commit_message | valid_commit_message) then .commit_message
+			    else error("Commit message is missing, invalid, or belongs to a different reviewed tree") end
+			  ' "$JOB/commit.json" > "$JOB/commit-message.txt" || {
+			    echo "A descriptive commit message for this snapshot is required; run cpr review $ID before approving again" >&2; exit 10;
 			  }
+			  git -C "$ROOT" -c user.name="$user_name" -c user.email="$user_email" \
+			    commit --cleanup=verbatim --file "$JOB/commit-message.txt" >/dev/null
+			fi
 			sha="$(git -C "$ROOT" rev-parse HEAD)"
 			printf '%s\n' "$sha" > "$JOB/base-sha"
 			printf 'CPR_COMMIT|%s\n' "$sha"

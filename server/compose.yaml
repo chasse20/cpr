@@ -13,6 +13,9 @@ x-settings:
   # Set both to true after signing in to Codex on the workers.
   run-workers: &run-workers 'false'
   publish-approved: &publish-approved 'false'
+  # Optional PR updates to a Discord channel. Keep the webhook URL in your private copy.
+  discord-enabled: &discord-enabled 'false'
+  discord-webhook-url: &discord-webhook-url ''
 
 x-worker: &worker
   build: .
@@ -27,13 +30,14 @@ x-worker: &worker
   stdin_open: true
   tty: true
   cap_drop: [ALL]
-  cap_add: [SETUID, SETGID, CHOWN, SYS_CHROOT, DAC_OVERRIDE]
+  # sshd must be able to record interactive logins in the Linux audit log
+  cap_add: [SETUID, SETGID, CHOWN, SYS_CHROOT, DAC_OVERRIDE, AUDIT_WRITE]
   # Allow Codex to create its sandbox namespaces inside the worker
   security_opt: ['no-new-privileges:true', 'seccomp=unconfined']
   pids_limit: 2048
   shm_size: 1gb
   tmpfs:
-    - /tmp:rw,nosuid,size=1g,mode=1777
+    - /tmp:rw,exec,nosuid,size=1g,mode=1777
     - /run:rw,nosuid,mode=0755
   environment:
     NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics,display
@@ -150,6 +154,8 @@ services:
       CPR__GitAuthorEmail: *git-email
       CPR__IsWorkerExecutionEnabled: *run-workers
       CPR__IsPublicationEnabled: *publish-approved
+      CPR__Discord__IsEnabled: *discord-enabled
+      CPR__Discord__WebhookUrl: *discord-webhook-url
 
   # Set device_ids per worker. Remove a worker's deploy block for CPU-only use.
   w101:

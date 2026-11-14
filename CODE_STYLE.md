@@ -83,11 +83,15 @@ Parallel.For
 - Keep EF Core PostgreSQL entities, enums and `Context` in `SQL/`. Use the `cpr` schema and maintain it manually in `orchestrator/Create.sql`, including seed data and application-role grants; do not add EF migrations or automatic schema creation.
 - Use entity-prefixed SQL keys such as `PullRequestId` and `WorkerId`. Configure EF mapping with entity annotations and conventions; keep `Context` free of `OnModelCreating`.
 - Keep review prompts and step settings in application configuration. Validate them at startup; keep prompt types and rendering in `Service/Review`.
+- Require explicit optimization and memory-lifetime passes within the affected review scope. Record candidate decisions and supporting measurements or inspection limits, including when no changes are justified; final validation must complete missing analysis.
 - Keep workspace ownership separate from active worker assignments. Preserve the validated workspace and release its worker while awaiting approval; reserve it again for editing or publication.
 - Serialize queue changes with worker scheduling and publication. Rereview invalidates approval; removing tracking preserves work and never closes the GitHub PR.
+- Generate descriptive commit messages with an `Auto: ` subject prefix from the final reviewed changes, retain them with the validated tree, and show them before approval. Publication must use that message rather than a generic review label.
 - Retain `Merged`, `Closed`, and `Removed` records outside active merge ordering. Merged and closed PRs retain only database history; automatically delete their files under worker locks. Removed PRs preserve files until explicit purge. Track remaining copies per worker and record completion after every recorded copy and orchestrator storage is deleted.
 - Persist each attempt's compact review result and usage before deleting files; distinguish complete, partial, and unknown usage. Completion gates must explain missing requirements so retries can address them.
 - Block stale or interrupted reviews, revoke stale approvals, and release idle workers without discarding unpublished work.
+- Persist explicit maintainer resolutions on the PR and capture them in each review run. Apply them to the named policy findings without repeating resolved approval requests; retain remaining technical checks and separate publication approval. Record acceptance as a maintainer decision, not independently verified provenance.
 - Group `Service/` by responsibility. Keep service records with the services that use them and request records with their controllers.
-- Remove unused parameters and obsolete configuration properties together with their arguments and settings.
+- Remove unused parameters and obsolete code, comments, and configuration together. Do not keep compatibility scaffolding for discarded prototypes.
+- Keep Discord notifications as text with clickable links; suppress embeds and preview thumbnails.
 - Use structured logging templates and preserve cancellation and resource lifetimes.

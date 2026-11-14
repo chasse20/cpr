@@ -69,6 +69,9 @@ ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "ReviewedTargetSha" varch
 ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "CleanupRequestedAt" timestamp with time zone NULL;
 UPDATE cpr."PullRequest" SET "CleanupRequestedAt" = COALESCE( "CompletedAt", now() ) WHERE "Status" IN ( 7, 8 ) AND "CleanupRequestedAt" IS NULL;
 
+-- Retain explicit maintainer decisions for subsequent review and validation
+ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "MaintainerResolution" varchar(16000) NULL;
+
 -- Old records may have copies on workers whose assignments were already released
 -- This one-time backfill is conservative; new records track only workers they use
 ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "StorageWorkerIds" int[] NULL;

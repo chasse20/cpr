@@ -110,7 +110,7 @@ namespace CPR.Service.Review
 			}
 
 			JsonElement tempContext = await tGitHub.ReadReviewContextAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
-			ReviewPlan tempPlan = new( tRequest.RemoteSha, tIsValidationOnly, tRequest.WorkReason == PullRequestWorkReason.Rereview, tempContext, [ .. tempSteps ], tOperationId );
+			ReviewPlan tempPlan = new( tRequest.RemoteSha, tIsValidationOnly, tRequest.WorkReason == PullRequestWorkReason.Rereview, tempContext, [ .. tempSteps ], tOperationId, tRequest.MaintainerResolution );
 
 			return await tWorkers.ExecuteAsync( tWorker, tRequest, tempPlan, tCancel );
 		}

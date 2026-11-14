@@ -13,6 +13,10 @@ require(type == "object"; "Result must be an object")
 | [
 	issue(.outcome == "complete"; "outcome must be complete after the assigned work is done"),
 	issue(.summary | text; "summary must explain the review result"),
+	issue(.commit_message == "" or (.commit_message | valid_commit_message); "commit_message must have a descriptive subject beginning with Auto: and at most 72 characters including that prefix, a blank line before any body, at most 4000 characters total, and no control characters or generic CPR review subject"),
+	(if $is_final and $is_commit_required then
+		issue(.commit_message | valid_commit_message; "commit_message is required for the final snapshot: describe the actual changes to be committed")
+	else empty end),
 	issue(.relevance.status | IN("relevant", "overlap"); "relevance.status must be relevant or overlap; unresolved relevance blocks completion"),
 	issue(.relevance.details | text; "relevance.details must explain the relevance decision"),
 	issue(.relevance.evidence | text; "relevance.evidence must support the relevance decision"),

@@ -1,5 +1,6 @@
 using CPR.Service;
 using CPR.Service.Command;
+using CPR.Service.Discord;
 using CPR.Service.GitHub;
 using CPR.Service.Queue;
 using CPR.Service.Review;
@@ -16,6 +17,7 @@ tempBuilder.Services.Configure<Settings>( tempBuilder.Configuration.GetSection( 
 
 Settings tempSettings = tempBuilder.Configuration.GetSection( "CPR" ).Get<Settings>() ?? new();
 ReviewService.ValidateSettings( tempSettings );
+tempSettings.Discord.Validate();
 
 if ( tempSettings.IsWorkerExecutionEnabled && ( string.IsNullOrWhiteSpace( tempSettings.GitAuthorName ) || string.IsNullOrWhiteSpace( tempSettings.GitAuthorEmail ) ) )
 {
@@ -56,6 +58,12 @@ tempBuilder.Services.AddSingleton<CleanupService>();
 tempBuilder.Services.AddSingleton<ReviewHistoryService>();
 tempBuilder.Services.AddScoped<ReviewService>();
 tempBuilder.Services.AddHostedService<QueueService>();
+tempBuilder.Services.AddHttpClient( "Discord", tClient =>
+{
+	tClient.Timeout = TimeSpan.FromSeconds( 30 );
+	tClient.DefaultRequestHeaders.UserAgent.ParseAdd( "DiscordBot (https://github.com/chasse20/cpr, 1.0)" );
+} ).RemoveAllLoggers().ConfigurePrimaryHttpMessageHandler( () => new HttpClientHandler { AllowAutoRedirect = false } );
+tempBuilder.Services.AddHostedService<DiscordNotificationService>();
 
 tempBuilder.Services.AddControllers().AddJsonOptions( x => x.JsonSerializerOptions.Converters.Add( new JsonStringEnumConverter() ) );
 tempBuilder.Services.AddAuthorization();
