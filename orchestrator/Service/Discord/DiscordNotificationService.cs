@@ -42,6 +42,7 @@ namespace CPR.Service.Discord
 								using HttpResponseMessage tempResponse = await tempClient.PostAsJsonAsync( tempUri, new
 								{
 									content = FormatMessage( tempRequest ),
+									flags = 4, // SUPPRESS_EMBEDS
 									allowed_mentions = new { parse = Array.Empty<string>() }
 								}, tCancel );
 

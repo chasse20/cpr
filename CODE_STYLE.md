@@ -91,4 +91,5 @@ Parallel.For
 - Persist explicit maintainer resolutions on the PR and capture them in each review run. Apply them to the named policy findings without repeating resolved approval requests; retain remaining technical checks and separate publication approval. Record acceptance as a maintainer decision, not independently verified provenance.
 - Group `Service/` by responsibility. Keep service records with the services that use them and request records with their controllers.
 - Remove unused parameters and obsolete code, comments, and configuration together. Do not keep compatibility scaffolding for discarded prototypes.
+- Keep Discord notifications as text with clickable links; suppress embeds and preview thumbnails.
 - Use structured logging templates and preserve cancellation and resource lifetimes.

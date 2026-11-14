@@ -113,7 +113,7 @@ Run one orchestrator instance. Public GitHub PR checkouts are supported; private
 
 ### Discord webhook notifications
 
-CPR checks saved PR statuses every five seconds and posts new or changed statuses to a Discord text channel. Messages include the PR link, CPR ID, status, observation time, and `cpr show ID`; blocked and failed CI updates include a shortened reason. Existing PRs establish the starting point when the orchestrator starts and are not announced. Notifications do not require any database changes.
+CPR checks saved PR statuses every five seconds and posts new or changed statuses to a Discord text channel. Messages include the PR link, CPR ID, status, observation time, and `cpr show ID`; blocked and failed CI updates include a shortened reason. Link previews and thumbnails are suppressed; links remain clickable. Existing PRs establish the starting point when the orchestrator starts and are not announced. Notifications do not require any database changes.
 
 Create a webhook for your channel under **Server Settings → Integrations → Webhooks**. Keep its URL private and merge these settings into the existing `CPR` object in the ignored `orchestrator/appsettings.Private.json`:
 
