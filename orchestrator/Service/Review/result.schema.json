@@ -1,11 +1,12 @@
 {
 	"type": "object",
 	"additionalProperties": false,
-	"required": ["outcome", "summary", "commit_message", "relevance", "coverage", "is_resource_measurement_required", "checks", "findings", "limitations", "follow_up"],
+	"required": ["outcome", "summary", "commit_message", "pr_comment", "relevance", "coverage", "is_resource_measurement_required", "checks", "findings", "limitations", "follow_up"],
 	"properties": {
 		"outcome": { "type": "string", "enum": ["complete", "needs_followup", "blocked"] },
 		"summary": { "type": "string" },
 		"commit_message": { "type": "string", "maxLength": 4000 },
+		"pr_comment": { "type": "string", "maxLength": 12000 },
 		"relevance": {
 			"type": "object",
 			"additionalProperties": false,

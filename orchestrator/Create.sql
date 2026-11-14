@@ -91,6 +91,16 @@ CREATE TABLE IF NOT EXISTS cpr."ReviewRun"
 CREATE UNIQUE INDEX IF NOT EXISTS "IX_ReviewRun_PullRequestId_WorkerId_RunKey" ON cpr."ReviewRun" ( "PullRequestId", "WorkerId", "RunKey" );
 CREATE INDEX IF NOT EXISTS "IX_ReviewRun_WorkerId" ON cpr."ReviewRun" ( "WorkerId" );
 
+-- Bind the preview to a final run and retain report delivery after worker cleanup
+ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "PreparedReviewRunId" bigint NULL REFERENCES cpr."ReviewRun" ( "ReviewRunId" ) ON DELETE RESTRICT;
+ALTER TABLE cpr."ReviewRun" ADD COLUMN IF NOT EXISTS "CommentBody" text NULL;
+ALTER TABLE cpr."ReviewRun" ADD COLUMN IF NOT EXISTS "PublishedSha" varchar(64) NULL;
+ALTER TABLE cpr."ReviewRun" ADD COLUMN IF NOT EXISTS "CommentId" bigint NULL;
+ALTER TABLE cpr."ReviewRun" ADD COLUMN IF NOT EXISTS "CommentError" varchar(4000) NULL;
+ALTER TABLE cpr."ReviewRun" ADD COLUMN IF NOT EXISTS "CommentAttemptedAt" timestamp with time zone NULL;
+ALTER TABLE cpr."ReviewRun" ADD COLUMN IF NOT EXISTS "CommentPublishedAt" timestamp with time zone NULL;
+CREATE INDEX IF NOT EXISTS "IX_ReviewRun_PendingComment" ON cpr."ReviewRun" ( "ReviewRunId" ) WHERE "PublishedSha" IS NOT NULL AND "CommentId" IS NULL AND "CommentBody" IS NOT NULL;
+
 -- WorkerStatus: Online = 0, Offline = 1, Paused = 2
 INSERT INTO cpr."Worker" ( "WorkerId", "SshHost", "Status" )
 VALUES

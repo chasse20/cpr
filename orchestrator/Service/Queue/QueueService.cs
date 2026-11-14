@@ -170,6 +170,7 @@ namespace CPR.Service.Queue
 					tempRequest.CleanupRequestedAt = DateTimeOffset.UtcNow;
 					tempRequest.ReviewedTargetSha = null;
 					tempRequest.PreparedSha = null;
+					tempRequest.PreparedReviewRunId = null;
 					tempRequest.ApprovedSha = null;
 					tempRequest.LastError = "File cleanup pending";
 					await tContext.SaveChangesAsync( tCancel );
@@ -345,6 +346,7 @@ namespace CPR.Service.Queue
 						{
 							tempRequest.Status = PullRequestStatus.Processing;
 							tempRequest.PreparedSha = null;
+							tempRequest.PreparedReviewRunId = null;
 							tempRequest.ReviewedTargetSha = null;
 							tempRequest.ApprovedSha = null;
 							tempReviews.Add( tempRequest );
@@ -421,6 +423,7 @@ namespace CPR.Service.Queue
 
 					if ( tempCurrent is not null && tempCurrent.WorkerId == tWorkerId && tempCurrent.Status == PullRequestStatus.Processing )
 					{
+						tempCurrent.PreparedReviewRunId = await ReviewComment.PrepareAsync( tempContext, tempCurrent, tempResult, tCancel );
 						tempCurrent.PreparedSha = tempResult.TreeSha;
 						tempCurrent.ReviewedTargetSha = tempResult.TargetSha;
 						tempCurrent.SessionId = tempResult.SessionId ?? tempCurrent.SessionId;
@@ -457,6 +460,7 @@ namespace CPR.Service.Queue
 				}
 
 				Worker tempWorker = await tempContext.Worker.AsNoTracking().SingleAsync( x => x.WorkerId == tempRequest.WorkerId.Value, tCancel );
+				ReviewRun tempRun = await ReviewComment.GetPreparedAsync( tempContext, tempRequest, tCancel );
 				string tempCommit = await tWorkers.CommitApprovedAsync( tempWorker, tempRequest, tCancel );
 
 				await tPublisher.PushAsync( tempRequest, tempWorker, tempCommit, tCancel );
@@ -467,12 +471,14 @@ namespace CPR.Service.Queue
 				{
 					PullRequest? tempCurrent = await tempContext.PullRequest.FindAsync( [ tId ], tCancel );
 
-					if ( tempCurrent is not null && tempCurrent.Status == PullRequestStatus.ReadyForApproval && tempCurrent.ApprovedSha == tempRequest.ApprovedSha && tempCurrent.WorkerId == tempRequest.WorkerId )
+					if ( tempCurrent is not null && tempCurrent.Status == PullRequestStatus.ReadyForApproval && tempCurrent.ApprovedSha == tempRequest.ApprovedSha && tempCurrent.PreparedReviewRunId == tempRequest.PreparedReviewRunId && tempCurrent.WorkerId == tempRequest.WorkerId )
 					{
+						tempRun.PublishedSha = tempCommit;
 						tempCurrent.PublishedSha = tempCommit;
 						tempCurrent.ReviewedTargetSha = null;
 						tempCurrent.RemoteSha = tempCommit;
 						tempCurrent.PreparedSha = null;
+						tempCurrent.PreparedReviewRunId = null;
 						tempCurrent.ApprovedSha = null;
 						tempCurrent.WorkerId = null;
 						tempCurrent.WorkspaceWorkerId = null;

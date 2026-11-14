@@ -14,6 +14,7 @@ namespace CPR.Service.Queue
 		{
 			tRequest.Status = PullRequestStatus.Blocked;
 			tRequest.PreparedSha = null;
+			tRequest.PreparedReviewRunId = null;
 			tRequest.ApprovedSha = null;
 			tRequest.ReviewedTargetSha = null;
 			tRequest.LastError = tReason[ ..Math.Min( 4000, tReason.Length ) ];

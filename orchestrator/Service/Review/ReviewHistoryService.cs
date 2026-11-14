@@ -28,7 +28,10 @@ namespace CPR.Service.Review
 
 					if ( tempExisting.TryGetValue( tempKey, out ReviewRun? tempSaved ) )
 					{
-						tempSaved.Details = tempRun.GetRawText();
+						if ( tempSaved.CommentBody is null )
+						{
+							tempSaved.Details = tempRun.GetRawText();
+						}
 					}
 					else
 					{

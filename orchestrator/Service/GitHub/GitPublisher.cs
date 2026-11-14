@@ -101,7 +101,7 @@ namespace CPR.Service.GitHub
 				using IServiceScope tempScope = tScopes.CreateScope();
 				Context tempContext = tempScope.ServiceProvider.GetRequiredService<Context>();
 
-				if ( !await tempContext.PullRequest.AnyAsync( x => x.PullRequestId == tRequest.PullRequestId && x.Status == PullRequestStatus.ReadyForApproval && x.ApprovedSha == tRequest.ApprovedSha && x.ReviewedTargetSha == tRequest.ReviewedTargetSha && x.WorkerId == tWorker.WorkerId, tCancel ) )
+				if ( !await tempContext.PullRequest.AnyAsync( x => x.PullRequestId == tRequest.PullRequestId && x.Status == PullRequestStatus.ReadyForApproval && x.ApprovedSha == tRequest.ApprovedSha && x.PreparedReviewRunId == tRequest.PreparedReviewRunId && x.ReviewedTargetSha == tRequest.ReviewedTargetSha && x.WorkerId == tWorker.WorkerId, tCancel ) )
 				{
 					throw new InvalidOperationException( "Approval changed before publication" );
 				}

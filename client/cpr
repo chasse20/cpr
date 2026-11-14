@@ -11,7 +11,8 @@ Usage: cpr COMMAND
 
   help              List commands
   status            List pull requests and file cleanup status
-  show ID           Show review results, checks, usage, and next action
+  show ID [--comment]
+                    Show review history, or preview the prepared PR comment
   workers           List workers and their assignments
   pause WORKER_ID   Stop new assignments to a worker; current work continues
   resume WORKER_ID  Make a paused worker available again
@@ -44,7 +45,10 @@ case "$command_name" in
   review)
     (($# == 1 || $# == 3)) || fail 'Usage: cpr review ID [--resolution TEXT]'
     if (($# == 3)); then [[ $2 == --resolution ]] || fail 'Usage: cpr review ID [--resolution TEXT]'; fi ;;
-  checkout|connect|approve|remove|show|cancel|purge)
+  show)
+    (($# == 1 || $# == 2)) || fail 'Usage: cpr show ID [--comment]'
+    if (($# == 2)); then [[ $2 == --comment ]] || fail 'Usage: cpr show ID [--comment]'; fi ;;
+  checkout|connect|approve|remove|cancel|purge)
     (($# == 1)) || fail "Usage: cpr $command_name ID" ;;
   pause|resume)
     (($# == 1)) || fail "Usage: cpr $command_name WORKER_ID" ;;
@@ -144,6 +148,11 @@ case "$command_name" in
   show)
     valid_id "$1"
     result=$(request GET "/api/pr/$1")
+    if [[ ${2:-} == --comment ]]; then
+      jq -e '.prComment | type == "string" and test("\\S")' <<< "$result" >/dev/null || fail "No prepared PR comment. Run cpr review $1 and wait for ReadyForApproval."
+      jq -r '.prComment' <<< "$result"
+      exit 0
+    fi
     jq -r '
       def usage_summary:
         if .usage.input_tokens == null or .usage.cached_input_tokens == null or .usage.output_tokens == null then "tokens unknown"
@@ -153,10 +162,19 @@ case "$command_name" in
       "Target: \(.targetBranch)  Head: \(.remoteSha)",
       (if .preparedSha != null then "Prepared tree: \(.preparedSha)  Reviewed target: \(.reviewedTargetSha)" else empty end),
       "Next: \(.nextAction)",
+      (if .prComment != null then "PR comment preview: cpr show \(.id) --comment" else empty end),
       (if .lastError != null then "Reason: \(.lastError)" else empty end),
       (if .maintainerResolution != null then "Maintainer resolution: \(.maintainerResolution)" else empty end),
       (if .cleanupRequestedAt != null then "Files: \(if .cleanedAt != null then "deleted" else "cleanup pending on workers " + (.storageWorkerIds | map(tostring) | join(", ")) end)" else empty end),
-      (.runs[]? | .details |
+      . as $pr |
+      (.runs[]? |
+        (if .publishedSha != null then
+          "\nPR comment for \(.publishedSha): " +
+          (if .commentId != null then "https://github.com/\($pr.repository)/pull/\($pr.number)#issuecomment-\(.commentId)"
+           elif .commentError != null then "delivery failed; retry pending — " + .commentError
+           else "delivery pending" end)
+         else empty end),
+        (.details |
         "\nRun \(.key): \(.manifest.status // "unknown")",
         (if .manifest.maintainer_resolution != null then "  Maintainer resolution: \(.manifest.maintainer_resolution)" else empty end),
         (.attempts[]? | "  \(.step // "unknown") attempt \(.attempt // "?"): \(.model // "?") / \(.reasoning_effort // "?")  \(.status // "unknown"); \(usage_summary)",
@@ -171,7 +189,7 @@ case "$command_name" in
           (.limitations[]? | "Limitation: \(.)"),
           (if .follow_up != null and .follow_up != "" then "Follow-up: \(.follow_up)" else empty end),
           .capture_error // empty),
-        (if .changes != "" then .changes else empty end))' <<< "$result" ;;
+        (if .changes != "" then .changes else empty end)))' <<< "$result" ;;
   review)
     valid_id "$1"; need jq
     payload=''

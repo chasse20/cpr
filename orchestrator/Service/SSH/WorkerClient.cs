@@ -158,12 +158,12 @@ namespace CPR.Service.SSH
 			string tempLine = tOutput.Split( '\n' ).LastOrDefault( x => x.StartsWith( "CPR_RESULT|", StringComparison.Ordinal ) ) ?? throw new InvalidOperationException( "Missing worker snapshot result" );
 			string[] tempParts = tempLine.Trim().Split( '|' );
 
-			if ( tempParts.Length < 4 || !Regex.IsMatch( tempParts[ 1 ], "^[a-f0-9]{40}$" ) || !Regex.IsMatch( tempParts[ 3 ], "^[a-f0-9]{40}$" ) )
+			if ( tempParts.Length != 5 || !Regex.IsMatch( tempParts[ 4 ], "^[A-Za-z0-9_-]{1,128}$" ) || !Regex.IsMatch( tempParts[ 1 ], "^[a-f0-9]{40}$" ) || !Regex.IsMatch( tempParts[ 3 ], "^[a-f0-9]{40}$" ) )
 			{
 				throw new InvalidOperationException( "Invalid worker tree SHA" );
 			}
 
-			return new( tempParts[ 1 ], string.IsNullOrWhiteSpace( tempParts[ 2 ] ) ? null : tempParts[ 2 ], tempParts[ 3 ] );
+			return new( tempParts[ 1 ], string.IsNullOrWhiteSpace( tempParts[ 2 ] ) ? null : tempParts[ 2 ], tempParts[ 3 ], tempParts[ 4 ] );
 		}
 
 		private const string PREAMBLE = """
@@ -294,7 +294,7 @@ namespace CPR.Service.SSH
 			mv "$JOB/commit.json.tmp" "$JOB/commit.json"
 			cp "$RUN/report.md" "$JOB/report.md"
 			printf '%s\n' "$tree" > "$JOB/tree"
-			printf 'CPR_RESULT|%s|%s|%s\n' "$tree" "$session" "$target_sha"
+			printf 'CPR_RESULT|%s|%s|%s|%s\n' "$tree" "$session" "$target_sha" "${RUN##*/}"
 			""";
 
 		private const string COMMIT_COMMANDS = """

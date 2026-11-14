@@ -152,6 +152,42 @@ namespace CPR.Service.GitHub
 			return tempBuckets.All( x => x is "pass" or "skipping" ) ? CIResult.Passed : CIResult.Pending;
 		}
 
+		public async Task<long> PublishCommentAsync( string tRepository, int tNumber, string tBody, string tMarker, CancellationToken tCancel )
+		{
+			string tempPath = $"repos/{tRepository}/issues/{tNumber}/comments";
+			JsonElement tempPages = await ReadJsonAsync( [ "api", "--paginate", "--slurp", $"{tempPath}?per_page=100" ], tCancel );
+
+			// Recover a successful submission whose response or database save was lost
+			foreach ( JsonElement tempPage in tempPages.EnumerateArray() )
+			{
+				foreach ( JsonElement tempComment in tempPage.EnumerateArray() )
+				{
+					string tempBody = Get( tempComment, "body" );
+
+					if ( tempBody.Contains( tMarker, StringComparison.Ordinal ) )
+					{
+						if ( tempBody != tBody )
+						{
+							throw new InvalidOperationException( "Existing CPR report has different text; inspect the GitHub comment before retrying" );
+						}
+
+						return tempComment.GetProperty( "id" ).GetInt64();
+					}
+				}
+			}
+
+			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "api", "--method", "POST", tempPath, "--input", "-" ], tInput: JsonSerializer.Serialize( new { body = tBody } ), tTimeoutSeconds: 60, tCancel: tCancel );
+
+			if ( !tempResult.IsSuccess )
+			{
+				throw new InvalidOperationException( $"GitHub PR comment failed: {tempResult.Failure}" );
+			}
+
+			using JsonDocument tempDocument = JsonDocument.Parse( tempResult.Output );
+
+			return tempDocument.RootElement.GetProperty( "id" ).GetInt64();
+		}
+
 		private static string Get( JsonElement tElement, string tProperty )
 		{
 			return tElement.TryGetProperty( tProperty, out JsonElement tempValue ) && tempValue.ValueKind == JsonValueKind.String ? tempValue.GetString() ?? "" : "";

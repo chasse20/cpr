@@ -96,6 +96,7 @@ namespace CPR.Controller
 					tempCurrent.CleanedAt = null;
 					tempCurrent.CleanupRequestedAt = null;
 					tempCurrent.PreparedSha = null;
+					tempCurrent.PreparedReviewRunId = null;
 					tempCurrent.ApprovedSha = null;
 					tempCurrent.ReviewedTargetSha = null;
 					tempCurrent.LastError = null;
@@ -154,6 +155,8 @@ namespace CPR.Controller
 				tempRequest.TargetBranch,
 				tempRequest.ReviewedTargetSha,
 				tempRequest.PreparedSha,
+				tempRequest.PreparedReviewRunId,
+				PrComment = tempRequest.Status == PullRequestStatus.ReadyForApproval ? tempRuns.SingleOrDefault( x => x.ReviewRunId == tempRequest.PreparedReviewRunId )?.CommentBody : null,
 				tempRequest.ApprovedSha,
 				tempRequest.PublishedSha,
 				tempRequest.CompletedAt,
@@ -162,7 +165,7 @@ namespace CPR.Controller
 				tempRequest.LastError,
 				tempRequest.MaintainerResolution,
 				NextAction = tempNext,
-				Runs = tempRuns.Select( x => new { x.WorkerId, Details = JsonSerializer.Deserialize<JsonElement>( x.Details ) } )
+				Runs = tempRuns.Select( x => new { x.ReviewRunId, x.WorkerId, x.PublishedSha, x.CommentId, x.CommentError, x.CommentAttemptedAt, x.CommentPublishedAt, Details = JsonSerializer.Deserialize<JsonElement>( x.Details ) } )
 			} );
 		}
 
@@ -256,6 +259,7 @@ namespace CPR.Controller
 					tempCurrent.WorkspaceWorkerId ??= tempCurrent.WorkerId;
 					tempCurrent.WorkerId = null;
 					tempCurrent.PreparedSha = null;
+					tempCurrent.PreparedReviewRunId = null;
 					tempCurrent.ApprovedSha = null;
 					tempCurrent.ReviewedTargetSha = null;
 
@@ -420,6 +424,7 @@ namespace CPR.Controller
 					tempRequest.WorkReason = tempRequest.Status == PullRequestStatus.CiFailure ? PullRequestWorkReason.CiRecovery : PullRequestWorkReason.Interactive;
 					tempRequest.Status = tempRequest.WorkerId is null ? PullRequestStatus.WaitingToBeProcessed : PullRequestStatus.Processing;
 					tempRequest.PreparedSha = null;
+					tempRequest.PreparedReviewRunId = null;
 					tempRequest.ReviewedTargetSha = null;
 					tempRequest.ApprovedSha = null;
 					tempRequest.LastError = "Interactive work requested; waiting for worker";
@@ -441,6 +446,7 @@ namespace CPR.Controller
 
 				tempRequest.Status = PullRequestStatus.Processing;
 				tempRequest.PreparedSha = null;
+				tempRequest.PreparedReviewRunId = null;
 				tempRequest.ReviewedTargetSha = null;
 				tempRequest.LastError = "Interactive session requested";
 
@@ -524,6 +530,7 @@ namespace CPR.Controller
 
 				tempRequest.Status = PullRequestStatus.Processing;
 				tempRequest.PreparedSha = null;
+				tempRequest.PreparedReviewRunId = null;
 				tempRequest.ReviewedTargetSha = null;
 				tempRequest.LastError = "Validating interactive edits";
 
@@ -562,6 +569,7 @@ namespace CPR.Controller
 						} );
 					}
 
+					tempCurrent.PreparedReviewRunId = await ReviewComment.PrepareAsync( tContext, tempCurrent, tempSnapshot, tCancel );
 					tempCurrent.PreparedSha = tempSnapshot.TreeSha;
 					tempCurrent.ReviewedTargetSha = tempSnapshot.TargetSha;
 					tempCurrent.SessionId = tempSnapshot.SessionId ?? tempCurrent.SessionId;
@@ -665,7 +673,7 @@ namespace CPR.Controller
 				{
 					PullRequest tempCurrent = await tContext.PullRequest.SingleAsync( x => x.PullRequestId == tId, tCancel );
 
-					if ( tempCurrent.Status != PullRequestStatus.ReadyForApproval || tempCurrent.PreparedSha != tempRequest.PreparedSha || tempCurrent.ApprovedSha is not null )
+					if ( tempCurrent.Status != PullRequestStatus.ReadyForApproval || tempCurrent.PreparedSha != tempRequest.PreparedSha || tempCurrent.PreparedReviewRunId != tempRequest.PreparedReviewRunId || tempCurrent.ApprovedSha is not null )
 					{
 						return Conflict( new { Error = "Review state changed while checking approval" } );
 					}
@@ -677,6 +685,8 @@ namespace CPR.Controller
 
 						return Conflict( new { Error = tempCurrent.LastError } );
 					}
+
+					await ReviewComment.GetPreparedAsync( tContext, tempCurrent, tCancel );
 
 					tempCurrent.ApprovedSha = tempCurrent.PreparedSha;
 					tempCurrent.LastError = null;
