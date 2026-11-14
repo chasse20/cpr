@@ -11,6 +11,7 @@ namespace CPR.Service.Review
 		Evidence,
 		FinalValidation,
 		Relevance,
-		Rereview
+		Rereview,
+		TweakSummary
 	}
 }

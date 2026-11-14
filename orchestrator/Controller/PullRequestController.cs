@@ -420,9 +420,9 @@ namespace CPR.Controller
 					} );
 				}
 
-				if ( tIsTweak && tempRequest.WorkspaceWorkerId is null )
+				if ( tIsTweak && tempRequest.WorkspaceWorkerId is null && tempRequest.PublishedSha != tempRequest.RemoteSha )
 				{
-					return Conflict( new { Error = "Manual tweaks require a saved PR workspace" } );
+					return Conflict( new { Error = "Manual tweaks require a saved workspace or the current CPR-published revision" } );
 				}
 
 				if ( tIsTweak || tempRequest.Status is PullRequestStatus.CiFailure or PullRequestStatus.Blocked || ( tempRequest.Status == PullRequestStatus.ReadyForApproval && tempRequest.WorkerId is null ) )

@@ -111,12 +111,23 @@ namespace CPR.Service.GitHub
 				tGate.Mutex.Release();
 			}
 
-			await GitAsync( [ "-C", tempDirectory, "-c", CREDENTIAL_HELPER, "push", tempRemoteUrl, $"{tNewCommit}:refs/heads/{tRequest.HeadBranch}" ], tCancel );
+			Exception? tempPushError = null;
+
+			try
+			{
+				await GitAsync( [ "-C", tempDirectory, "-c", CREDENTIAL_HELPER, "push", tempRemoteUrl, $"{tNewCommit}:refs/heads/{tRequest.HeadBranch}" ], tCancel );
+			}
+			catch ( InvalidOperationException tException )
+			{
+				// A lost response can follow a successful push; confirm the remote before failing
+				tempPushError = tException;
+			}
+
 			string tempAfter = await GitAsync( [ "-C", tempDirectory, "-c", CREDENTIAL_HELPER, "ls-remote", tempRemoteUrl, $"refs/heads/{tRequest.HeadBranch}" ], tCancel );
 
 			if ( !tempAfter.StartsWith( tNewCommit + "\t", StringComparison.Ordinal ) )
 			{
-				throw new InvalidOperationException( "Push result not confirmed; inspect remote before retry" );
+				throw new InvalidOperationException( "Push result not confirmed; inspect remote before retry", tempPushError );
 			}
 		}
 

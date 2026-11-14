@@ -2,6 +2,7 @@ using CPR.Service.GitHub;
 using CPR.Service.Review;
 using CPR.Service.SSH;
 using CPR.SQL;
+using System.Text.Json.Nodes;
 
 namespace CPR.Service.Queue
 {
@@ -239,7 +240,8 @@ namespace CPR.Service.Queue
 
 			using IServiceScope tempScope = tScopes.CreateScope();
 			Context tempContext = tempScope.ServiceProvider.GetRequiredService<Context>();
-			List<long> tempIds = await tempContext.PullRequest.AsNoTracking().Where( x => ( x.Status == PullRequestStatus.ReadyForApproval || x.Status == PullRequestStatus.Blocked || x.Status == PullRequestStatus.Removed ) && x.CleanupRequestedAt == null && x.ApprovedSha == null && x.WorkerId != null ).Select( x => x.PullRequestId ).ToListAsync( tCancel );
+			PullRequestStatus[] tempStatuses = [ PullRequestStatus.ReadyForApproval, PullRequestStatus.Blocked, PullRequestStatus.Removed, PullRequestStatus.WaitingForCi, PullRequestStatus.CiFailure, PullRequestStatus.WaitingForMergeTurn, PullRequestStatus.ReadyToBeMerged ];
+			List<long> tempIds = await tempContext.PullRequest.AsNoTracking().Where( x => tempStatuses.Contains( x.Status ) && x.CleanupRequestedAt == null && x.ApprovedSha == null && x.WorkerId != null ).Select( x => x.PullRequestId ).ToListAsync( tCancel );
 
 			foreach ( long tempId in tempIds )
 			{
@@ -250,7 +252,7 @@ namespace CPR.Service.Queue
 				{
 					tempRequest = await tempContext.PullRequest.Include( x => x.Worker ).AsNoTracking().SingleOrDefaultAsync( x => x.PullRequestId == tempId, tCancel );
 
-					if ( tempRequest?.Worker is null || tempRequest.Status is not ( PullRequestStatus.ReadyForApproval or PullRequestStatus.Blocked or PullRequestStatus.Removed ) || tempRequest.CleanupRequestedAt is not null || tempRequest.ApprovedSha is not null || !tGate.Running.TryAdd( tempId, Task.CompletedTask ) )
+					if ( tempRequest?.Worker is null || !tempStatuses.Contains( tempRequest.Status ) || tempRequest.CleanupRequestedAt is not null || tempRequest.ApprovedSha is not null || !tGate.Running.TryAdd( tempId, Task.CompletedTask ) )
 					{
 						tempRequest = null;
 					}
@@ -262,11 +264,17 @@ namespace CPR.Service.Queue
 
 				if ( tempRequest?.Worker is not null )
 				{
+					bool tempIsPublished = tempRequest.Status is PullRequestStatus.WaitingForCi or PullRequestStatus.CiFailure or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged;
+
 					try
 					{
 						await tHistory.CaptureAsync( tempRequest.Worker, tempRequest, tCancel );
 
-						if ( tempRequest.Status == PullRequestStatus.ReadyForApproval )
+						if ( tempIsPublished )
+						{
+							await tWorkers.ReleaseAsync( tempRequest.Worker, tempRequest, tCancel );
+						}
+						else if ( tempRequest.Status == PullRequestStatus.ReadyForApproval )
 						{
 							await tWorkers.ParkAsync( tempRequest.Worker, tempRequest, tCancel );
 						}
@@ -281,9 +289,9 @@ namespace CPR.Service.Queue
 						{
 							PullRequest? tempCurrent = await tempContext.PullRequest.FindAsync( [ tempId ], tCancel );
 
-							if ( tempCurrent is not null && tempCurrent.WorkerId == tempRequest.WorkerId && tempCurrent.Status is PullRequestStatus.ReadyForApproval or PullRequestStatus.Blocked or PullRequestStatus.Removed && tempCurrent.ApprovedSha is null )
+							if ( tempCurrent is not null && tempCurrent.WorkerId == tempRequest.WorkerId && tempStatuses.Contains( tempCurrent.Status ) && tempCurrent.ApprovedSha is null )
 							{
-								tempCurrent.WorkspaceWorkerId = tempRequest.WorkerId;
+								tempCurrent.WorkspaceWorkerId = tempIsPublished ? null : tempRequest.WorkerId;
 								tempCurrent.WorkerId = null;
 								await tempContext.SaveChangesAsync( tCancel );
 							}
@@ -464,7 +472,6 @@ namespace CPR.Service.Queue
 				string tempCommit = await tWorkers.CommitApprovedAsync( tempWorker, tempRequest, tCancel );
 
 				await tPublisher.PushAsync( tempRequest, tempWorker, tempCommit, tCancel );
-				await tWorkers.ReleaseAsync( tempWorker, tempRequest, tCancel );
 				await tGate.Mutex.WaitAsync( tCancel );
 
 				try
@@ -473,15 +480,27 @@ namespace CPR.Service.Queue
 
 					if ( tempCurrent is not null && tempCurrent.Status == PullRequestStatus.ReadyForApproval && tempCurrent.ApprovedSha == tempRequest.ApprovedSha && tempCurrent.PreparedReviewRunId == tempRequest.PreparedReviewRunId && tempCurrent.WorkerId == tempRequest.WorkerId )
 					{
-						tempRun.PublishedSha = tempCommit;
+						// A repeated approval of the same commit does not create another comment
+						if ( !await tempContext.ReviewRun.AnyAsync( x => x.PullRequestId == tId && x.PublishedSha == tempCommit, tCancel ) )
+						{
+							tempRun.PublishedSha = tempCommit;
+						}
+
+						// Consume pending updates even when an empty session kept the existing commit
+						JsonObject tempDetails = JsonNode.Parse( tempRun.Details )!.AsObject();
+						tempDetails[ "publication" ] ??= new JsonObject();
+						tempDetails[ "publication" ]![ "published_sha" ] = tempCommit;
+						tempRun.Details = tempDetails.ToJsonString();
+
 						tempCurrent.PublishedSha = tempCommit;
 						tempCurrent.ReviewedTargetSha = null;
 						tempCurrent.RemoteSha = tempCommit;
 						tempCurrent.PreparedSha = null;
 						tempCurrent.PreparedReviewRunId = null;
 						tempCurrent.ApprovedSha = null;
-						tempCurrent.WorkerId = null;
-						tempCurrent.WorkspaceWorkerId = null;
+
+						// Keep the worker reserved until release succeeds; polling retries release
+						tempCurrent.WorkspaceWorkerId = tempRequest.WorkerId;
 						tempCurrent.SessionId = null;
 						tempCurrent.Status = PullRequestStatus.WaitingForCi;
 						tempCurrent.LastError = null;
@@ -492,10 +511,30 @@ namespace CPR.Service.Queue
 				{
 					tGate.Mutex.Release();
 				}
+
+				await tWorkers.ReleaseAsync( tempWorker, tempRequest, tCancel );
+				await tGate.Mutex.WaitAsync( tCancel );
+
+				try
+				{
+					tempContext.ChangeTracker.Clear();
+					PullRequest? tempCurrent = await tempContext.PullRequest.FindAsync( [ tId ], tCancel );
+
+					if ( tempCurrent is not null && tempCurrent.WorkerId == tempWorker.WorkerId && tempCurrent.PublishedSha == tempCommit )
+					{
+						tempCurrent.WorkerId = null;
+						tempCurrent.WorkspaceWorkerId = null;
+						await tempContext.SaveChangesAsync( tCancel );
+					}
+				}
+				finally
+				{
+					tGate.Mutex.Release();
+				}
 			}
 			catch ( Exception tException ) when ( !tCancel.IsCancellationRequested )
 			{
-				tLogger.LogError( tException, "Approved push {Id} failed; no worker released", tId );
+				tLogger.LogError( tException, "Approved publication {Id} stopped; saved state retained", tId );
 				await RecordFailureAsync( tId, tException.Message, true, tCancel );
 			}
 		}

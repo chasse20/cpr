@@ -245,14 +245,14 @@ case "$command_name" in
     if [[ $is_tweak == true ]]; then
       # Manual Git integration needs writable Git metadata in the worker container
       codex_args=(codex --sandbox danger-full-access)
-      printf 'Opening Codex tweak session for PR %s on %s. Exit saves a local snapshot; no review, push, or GitHub merge.\n' "$id" "$host"
+      printf 'Opening Codex tweak session for PR %s on %s. Exit summarizes this session and saves a local snapshot; publication requires approval.\n' "$id" "$host"
     else
       printf 'Opening Codex for PR %s on %s...\n' "$id" "$host"
     fi
     [[ -z $session ]] || codex_args+=(resume "$session")
     if [[ $is_tweak == true ]]; then
       target=$(jq -r '.targetBranch' <<< "$result")
-      codex_args+=("This is a maintainer-requested manual CPR tweak session for CPR $id, target branch $target. Wait for my instructions and change only what I request. Preserve all saved review repairs and maintainer decisions. Local Git staging and commits are authorized to finish a previous pending merge and integrate the latest target; do not rewrite the saved history. Resolve and stage conflicts and run only checks relevant to the integration. Do not repeat the full CPR review, scope audit, optimization or memory passes. Do not push, publish, or merge the GitHub PR. On successful exit CPR checks and saves the local snapshot without an automated AI review; publication still requires a separate cpr approve $id.")
+      codex_args+=("This is a maintainer-requested manual CPR tweak session for CPR $id, target branch $target. Wait for my instructions and change only what I request. Preserve all saved review repairs and maintainer decisions. Local Git staging and commits are authorized to finish a previous pending merge and integrate the latest target; do not rewrite the saved history. Resolve and stage conflicts and run only checks relevant to the integration. Do not repeat the full CPR review, scope audit, optimization or memory passes. Do not push, publish, or merge the GitHub PR. Record any checks you actually run and their results in /state/cpr/jobs/$id/tweak-checks.md; do not claim earlier checks ran in this session. On successful exit CPR briefly summarizes only this session and checks the local snapshot without another full review; publication still requires a separate cpr approve $id.")
     fi
     printf -v codex_command '%q ' "${codex_args[@]}"
     remote_script="test \"\$(cat /state/cpr/active-id)\" = \"$id\" && test ! -f /state/cpr/released-$id && cd /workspace/repo && exec $codex_command"
@@ -261,7 +261,7 @@ case "$command_name" in
       fail 'Codex session did not exit successfully; edits remain on the worker.'
     fi
     if [[ $is_tweak == true ]]; then
-      printf 'Checking and saving the tweak snapshot; skipping automated review...\n'
+      printf 'Summarizing this tweak session and saving the snapshot; skipping automated review...\n'
     else
       printf 'Validating edits and retaining review evidence...\n'
     fi

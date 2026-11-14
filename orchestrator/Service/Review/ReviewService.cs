@@ -73,6 +73,13 @@ namespace CPR.Service.Review
 				throw new InvalidOperationException( "PR head or destination changed; request a fresh review before completing the manual merge" );
 			}
 
+			if ( tRequest.PublishedSha is null )
+			{
+				using IServiceScope tempScope = tScopes.CreateScope();
+				Context tempContext = tempScope.ServiceProvider.GetRequiredService<Context>();
+				await ReviewComment.GetFullReportAsync( tempContext, tRequest, tCancel );
+			}
+
 			try
 			{
 				WorkerSnapshot tempResult = await tWorkers.CompleteTweakAsync( tWorker, tRequest, tempRemote.TargetSha, tCancel );
@@ -138,7 +145,7 @@ namespace CPR.Service.Review
 			}
 
 			JsonElement tempContext = await tGitHub.ReadReviewContextAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
-			ReviewPlan tempPlan = new( tRequest.RemoteSha, tIsValidationOnly, tRequest.WorkReason == PullRequestWorkReason.Rereview, tempContext, [ .. tempSteps ], tOperationId, tRequest.MaintainerResolution );
+			ReviewPlan tempPlan = new( tRequest.RemoteSha, tIsValidationOnly, tRequest.WorkReason == PullRequestWorkReason.Rereview, tempContext, [ .. tempSteps ], tOperationId, tRequest.MaintainerResolution, tRequest.PublishedSha );
 
 			return await tWorkers.ExecuteAsync( tWorker, tRequest, tempPlan, tCancel );
 		}

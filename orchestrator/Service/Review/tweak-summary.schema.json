@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "commit_message": {
+      "type": "string"
+    },
+    "pr_comment": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "summary",
+    "commit_message",
+    "pr_comment"
+  ],
+  "additionalProperties": false
+}

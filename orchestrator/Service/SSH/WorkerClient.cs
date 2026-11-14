@@ -28,8 +28,9 @@ namespace CPR.Service.SSH
 				.Replace( "{{ResultSchema}}", ReadResource( "result.schema.json" ), StringComparison.Ordinal )
 				.Replace( "{{ResultValidation}}", ReadResource( "commit-message.jq" ) + "\n" + ReadResource( "validate-result.jq" ), StringComparison.Ordinal )
 				.Replace( "{{ResultReport}}", ReadResource( "report-result.jq" ), StringComparison.Ordinal )
-				.Replace( "{{ScopeValidation}}", ReadResource( "validate-scope.jq" ), StringComparison.Ordinal );
-			string tempCommands = $"is_review={( tPlan.IsValidationOnly ? 0 : 1 )}\n{PREPARE_COMMANDS}\n{tempReview}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}";
+				.Replace( "{{ScopeValidation}}", ReadResource( "validate-scope.jq" ), StringComparison.Ordinal )
+				.Replace( "{{UsageReport}}", ReadResource( "record-usage.jq" ), StringComparison.Ordinal );
+			string tempCommands = $"is_review={( tPlan.IsValidationOnly ? 0 : 1 )}\n{PREPARE_COMMANDS}\n{tempReview}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}\nrm -f \"$JOB/tweak-base.json\"";
 			int tempTimeout = tPlan.Steps.Sum( x => ( x.TimeoutSeconds + 15 ) * x.MaxAttempts ) + 600;
 			string tempOutput = await RunAsync( tWorker, tRequest, "run", tempCommands, JsonSerializer.Serialize( tPlan ), tempTimeout, tCancel );
 
@@ -38,8 +39,9 @@ namespace CPR.Service.SSH
 
 		public async Task<string?> PrepareInteractiveAsync( Worker tWorker, PullRequest tRequest, CancellationToken tCancel )
 		{
-			string tempPreserve = tRequest.WorkReason == PullRequestWorkReason.ManualTweak ? "is_preserved=1\n" : "";
-			string tempOutput = await RunAsync( tWorker, tRequest, "prepare", tempPreserve + PREPARE_COMMANDS + "\nif test -s \"$JOB/session-id\"; then printf 'CPR_SESSION|%s\\n' \"$(cat \"$JOB/session-id\")\"; fi", tCancel: tCancel );
+			string tempPreserve = tRequest.WorkReason == PullRequestWorkReason.ManualTweak && tRequest.PublishedSha != tRequest.RemoteSha ? "is_preserved=1\n" : "";
+			string tempTweak = tRequest.WorkReason == PullRequestWorkReason.ManualTweak ? "\n" + ReadResource( "prepare-tweak.sh" ) : "";
+			string tempOutput = await RunAsync( tWorker, tRequest, "prepare", tempPreserve + PREPARE_COMMANDS + tempTweak + "\nif test -s \"$JOB/session-id\"; then printf 'CPR_SESSION|%s\\n' \"$(cat \"$JOB/session-id\")\"; fi", tCancel: tCancel );
 			string? tempSession = tempOutput.Split( '\n' ).LastOrDefault( x => x.StartsWith( "CPR_SESSION|", StringComparison.Ordinal ) )?[ "CPR_SESSION|".Length.. ].Trim();
 
 			return tempSession is not null && Regex.IsMatch( tempSession, "^[A-Za-z0-9_-]{6,128}$" ) ? tempSession : null;
@@ -47,9 +49,14 @@ namespace CPR.Service.SSH
 
 		public async Task<WorkerSnapshot> CompleteTweakAsync( Worker tWorker, PullRequest tRequest, string tTargetSha, CancellationToken tCancel )
 		{
-			string tempCommands = $"is_preserved=1\n{PREPARE_COMMANDS}\n{ReadResource( "complete-tweak.sh" )}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}";
-			string tempData = JsonSerializer.Serialize( new { HeadSha = tRequest.RemoteSha, TargetSha = tTargetSha, tRequest.MaintainerResolution } );
-			string tempOutput = await RunAsync( tWorker, tRequest, "manual-tweak", tempCommands, tempData, 180, tCancel );
+			ReviewStepSettings tempStep = _settings.ReviewSteps.Last( x => x.IsEnabled );
+			string tempTweak = ReadResource( "complete-tweak.sh" )
+				.Replace( "{{TweakSummarySchema}}", ReadResource( "tweak-summary.schema.json" ), StringComparison.Ordinal )
+				.Replace( "{{CommitMessageValidation}}", ReadResource( "commit-message.jq" ), StringComparison.Ordinal )
+				.Replace( "{{UsageReport}}", ReadResource( "record-usage.jq" ), StringComparison.Ordinal );
+			string tempCommands = $"is_preserved=1\n{PREPARE_COMMANDS}\n{tempTweak}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}\nrm -f \"$JOB/tweak-base.json\"";
+			string tempData = JsonSerializer.Serialize( new { HeadSha = tRequest.RemoteSha, TargetSha = tTargetSha, tRequest.MaintainerResolution, tRequest.PublishedSha, SummaryPrompt = _settings.Prompts[ PromptKind.TweakSummary ], SummaryModel = tempStep.Model, SummaryReasoningEffort = "low", SummaryTimeoutSeconds = Math.Min( 180, tempStep.TimeoutSeconds ) } );
+			string tempOutput = await RunAsync( tWorker, tRequest, "manual-tweak", tempCommands, tempData, 300, tCancel );
 
 			return ParseSnapshot( tempOutput );
 		}
@@ -278,7 +285,7 @@ namespace CPR.Service.SSH
 			printf '%s\n' "$url" > "$JOB/url"
 			if test "$is_new" = 1; then
 			  git -C "$ROOT" rev-parse HEAD > "$JOB/base-sha"
-			  rm -f "$JOB/tree" "$JOB/session-id" "$JOB/target-sha" "$JOB/published" "$JOB/commit.json" "$JOB/commit-message.txt"
+			  rm -f "$JOB/tree" "$JOB/session-id" "$JOB/target-sha" "$JOB/published" "$JOB/commit.json" "$JOB/commit-message.txt" "$JOB/tweak-base.json" "$JOB/tweak-checks.md"
 			  printf '%s\n' "$TARGET" > "$JOB/target-branch"
 			fi
 			test -s "$JOB/base-sha" || { echo 'Incomplete checkout preparation; preserve workspace for inspection' >&2; exit 5; }

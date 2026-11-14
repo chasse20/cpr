@@ -26,32 +26,18 @@ CPR_RESULT_REPORT
 cat > "$RUN/validate-scope.jq" <<'CPR_SCOPE_VALIDATION'
 {{ScopeValidation}}
 CPR_SCOPE_VALIDATION
+cat > "$RUN/record-usage.jq" <<'CPR_USAGE_REPORT'
+{{UsageReport}}
+CPR_USAGE_REPORT
 
 jq -n --argjson id "$ID" --arg url "$(decode "$URL64")" --arg started "$(date -u +%FT%TZ)" \
   --arg scratch "$SCRATCH" --arg version "$(codex --version)" --slurpfile plan "$RUN/plan.json" \
-  '{cpr_id: $id, url: $url, status: "running", started_at: $started, scratch: $scratch, codex_version: $version, maintainer_resolution: $plan[0].MaintainerResolution, attempts: []}' > "$RUN/manifest.json"
+  '{cpr_id: $id, url: $url, status: "running", started_at: $started, scratch: $scratch, codex_version: $version, maintainer_resolution: $plan[0].MaintainerResolution, previous_published_sha: $plan[0].PublishedSha, report_kind: (if $plan[0].PublishedSha == null then "full_review" else "commit_summary" end), attempts: []}' > "$RUN/manifest.json"
 
 record_usage() {
   local events="$ATTEMPT/events.jsonl"
   if ! test -f "$events"; then events=/dev/null; fi
-  jq -Rn --argjson exit_code "$1" '
-    reduce inputs as $line (
-      {input_tokens: null, cached_input_tokens: null, output_tokens: null, is_complete: true, started_turns: 0, completed_turns: 0};
-      ($line | (fromjson? | objects) // {}) as $event |
-      if $event.type == "turn.started" then .started_turns += 1
-      elif $event.type == "turn.completed" then
-        .completed_turns += 1 |
-        (($event.usage | objects) // {}) as $usage |
-        if ([$usage.input_tokens, $usage.cached_input_tokens, $usage.output_tokens] |
-          all(.[]; type == "number" and . >= 0 and . == floor)) and $usage.cached_input_tokens <= $usage.input_tokens then
-          .input_tokens = ((.input_tokens // 0) + $usage.input_tokens) |
-          .cached_input_tokens = ((.cached_input_tokens // 0) + $usage.cached_input_tokens) |
-          .output_tokens = ((.output_tokens // 0) + $usage.output_tokens)
-        else .is_complete = false end
-      elif $event.type == "turn.failed" or $event.type == "error" or $event.type == null then .is_complete = false
-      else . end)
-    | .is_complete = (.is_complete and $exit_code == 0 and .completed_turns > 0 and .started_turns == .completed_turns)
-    | del(.started_turns, .completed_turns)' "$events" > "$ATTEMPT/usage.json"
+  jq -Rn --argjson exit_code "$1" -f "$RUN/record-usage.jq" "$events" > "$ATTEMPT/usage.json"
 }
 
 finish_review() {
@@ -208,6 +194,7 @@ for ((step=0; step<step_count; ++step)); do
     cat >> "$ATTEMPT/prompt.txt" <<CPR_REVIEW_CONTEXT
 
 CPR execution facts:
+- Publication report_kind: $(jq -r '.report_kind' "$RUN/manifest.json"). For commit_summary, pr_comment covers only the outgoing delta from $head_sha to the final working tree, including integration and checks relevant to those changes. Full original PR review and internal evidence remain required.
 - Assigned step: $name; final step: $is_final; completing an interactive session: $is_validation_only
 - PR: $(decode "$URL64"); target branch: $TARGET; checkout: $ROOT
 - Original head: $head_sha; current target: $target_sha; comparison base: $comparison_sha; previously integrated target (empty if none): $integration_sha

@@ -31,7 +31,10 @@ namespace CPR.Service.GitHub
 						{
 							PullRequest tempRequest = tempRun.PullRequest!;
 							string tempMarker = $"<!-- cpr-report:{tempRequest.PullRequestId}:{tempRun.WorkerId}:{tempRun.RunKey} -->";
-							string tempBody = $"## CPR review report\n\nPublished revision: [{tempRun.PublishedSha![ ..7 ]}](https://github.com/{tempRequest.Repository}/commit/{tempRun.PublishedSha})\n\n{tempRun.CommentBody}\n\n{tempMarker}";
+							using JsonDocument tempDetails = JsonDocument.Parse( tempRun.Details );
+							JsonElement tempManifest = tempDetails.RootElement.GetProperty( "manifest" );
+							string tempTitle = tempManifest.TryGetProperty( "report_kind", out JsonElement tempKind ) && tempKind.GetString() == "commit_summary" ? "CPR commit summary" : "CPR review report";
+							string tempBody = $"## {tempTitle}\n\nPublished revision: [{tempRun.PublishedSha![ ..7 ]}](https://github.com/{tempRequest.Repository}/commit/{tempRun.PublishedSha})\n\n{tempRun.CommentBody}\n\n{tempMarker}";
 
 							tempRun.CommentId = await tGitHub.PublishCommentAsync( tempRequest.Repository, tempRequest.Number, tempBody, tempMarker, tCancel );
 							tempRun.CommentPublishedAt = DateTimeOffset.UtcNow;
