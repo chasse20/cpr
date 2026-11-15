@@ -130,12 +130,15 @@ namespace CPR.Service.GitHub
 
 					foreach ( JsonElement tempItem in tempResponse.Comments )
 					{
-						if ( tempItem.TryGetProperty( "user", out JsonElement tempUser ) && Get( tempUser, "login" ).Equals( "coderabbitai[bot]", StringComparison.OrdinalIgnoreCase ) && Get( tempUser, "type" ) == "Bot" && !string.IsNullOrWhiteSpace( Get( tempItem, "body" ) ) && Get( tempItem, "state" ) is not ( "PENDING" or "DISMISSED" ) )
+						if ( tempItem.TryGetProperty( "user", out JsonElement tempUser ) && Get( tempUser, "login" ).Equals( "coderabbitai[bot]", StringComparison.OrdinalIgnoreCase ) && Get( tempUser, "type" ) == "Bot" && !string.IsNullOrWhiteSpace( Get( tempItem, "body" ) ) && Get( tempItem, "state" ) is not ( "PENDING" or "DISMISSED" ) && IsActionableFeedback( tempKind, Get( tempItem, "body" ) ) )
 						{
 							string tempBody = Get( tempItem, "body" );
 							string tempFile = Get( tempItem, "path" );
 							string tempCommit = Get( tempItem, "commit_id" );
-							string tempVersion = Convert.ToHexStringLower( System.Security.Cryptography.SHA256.HashData( Encoding.UTF8.GetBytes( JsonSerializer.Serialize( new[] { tempBody, tempFile, tempCommit } ) ) ) );
+							// GitHub remaps inline commit IDs after a push without changing the finding
+							int tempInfo = tempKind == "review" ? tempBody.IndexOf( "<h6>", StringComparison.Ordinal ) : -1;
+							string tempFinding = tempInfo < 0 ? tempBody : tempBody[ ..tempInfo ].TrimEnd();
+							string tempVersion = Convert.ToHexStringLower( System.Security.Cryptography.SHA256.HashData( Encoding.UTF8.GetBytes( JsonSerializer.Serialize( new[] { tempFinding, tempFile } ) ) ) );
 							tempComments.Add( new( $"{tempKind}:{tempItem.GetProperty( "id" ).GetInt64()}", tempVersion, Get( tempItem, "html_url" ), tempBody, tempFile, tempCommit ) );
 						}
 					}
@@ -143,6 +146,22 @@ namespace CPR.Service.GitHub
 			}
 
 			return [ .. tempComments ];
+		}
+
+		private static bool IsActionableFeedback( string tKind, string tBody )
+		{
+			if ( Regex.IsMatch( tBody, @"✅\s+Addressed in commit [a-f0-9]+\s*\z", RegexOptions.IgnoreCase ) )
+			{
+				return false;
+			}
+
+			if ( tKind == "discussion" && tBody.Contains( "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->", StringComparison.Ordinal ) )
+			{
+				return false;
+			}
+
+			// Review summaries only trigger repair when CodeRabbit reports actionable comments
+			return tKind != "review" || Regex.IsMatch( tBody, @"\*\*Actionable comments posted:\s*[1-9][0-9]*\*\*" );
 		}
 
 		private async Task<FeedbackPage> ReadFeedbackPageAsync( string tPath, CancellationToken tCancel )
