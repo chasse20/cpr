@@ -28,17 +28,20 @@ require(type == "object"; "Result must be an object")
 	(.checks | to_entries[] | .key as $index | .value | "checks[\($index)] (\(.id // "missing ID"))" as $context_name |
 		issue(.id | text; "\($context_name).id must be nonempty"),
 		issue(.command | text; "\($context_name).command must identify the actual command"),
+		issue((if has("kind") then .kind else "command" end) | IN("command", "inspection"); "\($context_name).kind must be command or inspection"),
 		issue(.details | text; "\($context_name).details must explain the result"),
 		issue(.status | IN("passed", "failed", "blocked", "not_run"); "\($context_name).status must be passed, failed, blocked, or not_run"),
 		issue(.is_required | type == "boolean"; "\($context_name).is_required must be a boolean"),
 		issue(.is_baseline_failure | type == "boolean"; "\($context_name).is_baseline_failure must be a boolean"),
 		issue(.artifact | type == "string"; "\($context_name).artifact must be a relative evidence path or an empty string"),
 		(if .status == "passed" then
-			issue(.exit_code == 0; "\($context_name): passed checks require exit_code 0"),
+			issue(if .kind == "inspection" then .exit_code == null else .exit_code == 0 end; "\($context_name): passed commands require exit_code 0; non-process inspections require null"),
 			issue(.artifact | text; "\($context_name): passed checks require a retained evidence artifact")
 		elif .status == "failed" then
 			issue(.exit_code | type == "number" and . != 0; "\($context_name): failed checks require a nonzero exit_code")
-		else issue(.exit_code == null; "\($context_name): blocked or unrun checks require a null exit_code") end),
+		elif .status == "blocked" then
+			issue(.exit_code == null or ((.exit_code | type == "number" and . != 0 and . == floor) and (.artifact | text)); "\($context_name): interrupted checks may retain a nonzero exit_code with evidence; otherwise use null")
+		else issue(.exit_code == null; "\($context_name): unrun checks require a null exit_code") end),
 		issue(.is_required != true or .status == "passed" or (.status == "failed" and .is_baseline_failure == true and (.artifact | text));
 			"\($context_name): required checks must pass or retain evidence of a demonstrated baseline failure")),
 	issue(.coverage | keys == ["cleanup", "correctness", "final_diff", "resources"]; "coverage must contain correctness, resources, cleanup, and final_diff"),
@@ -53,7 +56,7 @@ require(type == "object"; "Result must be an object")
 		(if $is_final then issue(.status != "incomplete"; "\($context_name) is incomplete; complete the missing required work before final validation") else empty end)),
 	issue(.is_resource_measurement_required | type == "boolean"; "is_resource_measurement_required must be a boolean"),
 	(if $is_final then
-		issue(.scope_audit | text; "scope_audit is required for final validation: account for the full original PR and subsequent repairs"),
+		issue(.scope_audit | text; "scope_audit is required for final validation: account for every path in the assigned required_paths inventory"),
 		issue(.coverage.final_diff.status == "verified"; "coverage.final_diff must be verified with retained final-diff evidence"),
 		issue(.is_resource_measurement_required != true or .coverage.resources.status == "verified"; "coverage.resources must be verified with retained measurements when resource measurement is required")
 	else empty end)

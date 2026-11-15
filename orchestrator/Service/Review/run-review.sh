@@ -3,17 +3,20 @@ ready_repo
 mkdir -p "$JOB/runs"
 previous_run="$(cat "$JOB/latest-run" 2>/dev/null || true)"
 RUN="$(mktemp -d "$JOB/runs/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
-SCRATCH="$(mktemp -d "/tmp/cpr-review-$ID-XXXXXX")"
+SCRATCH="$RUN/artifacts"
 mkdir -p "$SCRATCH/evidence"
 decode "$DATA64" > "$RUN/plan.json"
 operation="$(jq -r '.OperationId' "$RUN/plan.json")"
 [[ "$operation" =~ ^[a-f0-9]{32}$ ]] || exit 2
 review_pid=''
 jq '.PriorReview // null' "$RUN/plan.json" > "$SCRATCH/prior-review.json"
+jq '.Feedback // []' "$RUN/plan.json" > "$SCRATCH/feedback.json"
 jq '.Context' "$RUN/plan.json" > "$SCRATCH/context.json"
 printf '%s\n' "$RUN" > "$JOB/latest-run"
 review_status=running
 session=''
+is_report_retry="$(jq -r '.IsReportRetry // false' "$RUN/plan.json")"
+is_historical_report=false
 
 cat > "$RUN/result.schema.json" <<'CPR_RESULT_SCHEMA'
 {{ResultSchema}}
@@ -27,15 +30,27 @@ CPR_RESULT_REPORT
 cat > "$RUN/validate-scope.jq" <<'CPR_SCOPE_VALIDATION'
 {{ScopeValidation}}
 CPR_SCOPE_VALIDATION
+cat > "$RUN/validate-feedback.jq" <<'CPR_FEEDBACK_VALIDATION'
+{{FeedbackValidation}}
+CPR_FEEDBACK_VALIDATION
 cat > "$RUN/normalize-coverage.jq" <<'CPR_NORMALIZE_COVERAGE'
 {{NormalizeCoverage}}
 CPR_NORMALIZE_COVERAGE
 cat > "$RUN/report-fields.jq" <<'CPR_REPORT_FIELDS'
 {{ReportFieldsValidation}}
 CPR_REPORT_FIELDS
+cat > "$RUN/saved-validation.schema.json" <<'CPR_SAVED_VALIDATION_SCHEMA'
+{{SavedValidationSchema}}
+CPR_SAVED_VALIDATION_SCHEMA
 cat > "$RUN/report-repair.schema.json" <<'CPR_REPORT_REPAIR_SCHEMA'
 {{ReportRepairSchema}}
 CPR_REPORT_REPAIR_SCHEMA
+cat > "$RUN/report-recovery.schema.json" <<'CPR_REPORT_RECOVERY_SCHEMA'
+{{ReportRecoverySchema}}
+CPR_REPORT_RECOVERY_SCHEMA
+cat > "$RUN/apply-report-recovery.jq" <<'CPR_APPLY_REPORT_RECOVERY'
+{{ApplyReportRecovery}}
+CPR_APPLY_REPORT_RECOVERY
 cat > "$RUN/record-usage.jq" <<'CPR_USAGE_REPORT'
 {{UsageReport}}
 CPR_USAGE_REPORT
@@ -68,10 +83,6 @@ finish_review() {
       if test "$review_exit" = 0; then review_exit=14; fi
     fi
   fi
-  if ! { mkdir -p "$RUN/artifacts" && cp -a "$SCRATCH/." "$RUN/artifacts/"; }; then
-    echo "Unable to retain review artifacts from $SCRATCH" >&2
-    if test "$review_exit" = 0; then review_exit=14; fi
-  fi
   if test -f "$JOB/cancel-$operation"; then
     review_status=cancelled
   elif test "$review_exit" = 0 && test "$review_status" = validated; then
@@ -85,17 +96,20 @@ finish_review() {
     if test "$review_exit" = 0; then review_exit=14; fi
   fi
   if test "$review_exit" != 0; then printf 'Review incomplete; retained run: %s\n' "$RUN" >&2; fi
-  if test "$review_exit" = 0; then rm -rf -- "$SCRATCH"; fi
   exit "$review_exit"
 }
 trap finish_review EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
-if test "$(jq -r '.IsReportRetry // false' "$RUN/plan.json")" = true; then
+if test "$is_report_retry" = true; then
   source_run="$previous_run"
   if test -f "$source_run/manifest.json"; then
     source_run="$(jq -r --arg source "$source_run" '.report_source_run // $source' "$source_run/manifest.json")"
   fi
+  [[ "$source_run" == "$JOB/runs/"* && "${source_run##*/}" =~ ^[A-Za-z0-9_-]+$ ]] &&
+    test "$(realpath -e -- "$source_run")" = "$source_run" || {
+    echo 'No canonical saved review run is available for report recovery' >&2; exit 13;
+  }
   jq --arg source "$source_run" '.kind = "report_retry" | .report_source_run = $source' "$RUN/manifest.json" > "$RUN/manifest.tmp"
   mv "$RUN/manifest.tmp" "$RUN/manifest.json"
 fi
@@ -121,7 +135,7 @@ check_scope() {
 }
 
 check_worktree() {
-  if test "$is_final" = true && ! GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" diff --cached --check "$head_sha"; then
+  if test "$is_final" = true && ! git -C "$ROOT" diff --check "$head_sha" "$output_tree"; then
     echo 'Resolve conflict markers and whitespace errors in the working tree; CPR handles staging.'
     return 1
   fi
@@ -143,7 +157,18 @@ check_artifacts() {
 check_report() {
   jq -e --argjson is_final "$is_final" --argjson is_commit_required "$is_commit_required" \
     -f "$RUN/validate-result.jq" "$ATTEMPT/result.json" &&
-    check_artifacts && check_scope && check_worktree
+    check_artifacts && check_scope && check_worktree && check_feedback
+}
+
+check_feedback() {
+  if test "$is_feedback_repair" = true; then
+    local dispositions="$SCRATCH/evidence/feedback-dispositions.json"
+    test -f "$dispositions" && test "$(realpath -e -- "$dispositions")" = "$dispositions" || {
+      echo 'Missing canonical evidence/feedback-dispositions.json'; return 1;
+    }
+    jq -e --slurpfile feedback "$SCRATCH/feedback.json" --slurpfile result "$ATTEMPT/result.json" \
+      -f "$RUN/validate-feedback.jq" "$dispositions"
+  fi
 }
 
 execute_codex() {
@@ -153,6 +178,7 @@ execute_codex() {
   exec 8> "$JOB/control-$operation" || return
   flock 8 || return
   if test -f "$JOB/cancel-$operation"; then flock -u 8; return 130; fi
+  # A zero limit disables elapsed-time termination; process-group cancellation remains available
   (cd "$directory" && exec env CPR_REVIEW_OPERATION="$operation" setsid timeout --kill-after=15s "$timeout_seconds" "$@" < "$prompt" > "$events" 2> "$stderr") 8>&- 9>&- &
   review_pid=$!
   stat_line="$(cat "/proc/$review_pid/stat" 2>/dev/null || true)"
@@ -167,35 +193,73 @@ execute_codex() {
 
 {{ReportRepair}}
 
+{{ReportRecovery}}
+
+{{SavedValidation}}
+
 write_review_scope() {
   local tree="$1" destination="$2"
   git -C "$ROOT" diff --no-renames --name-only -z "${scope_base_tree:-$head_sha}" "$tree" > "$RUN/working-tree-paths"
   jq -n --arg base "$comparison_sha" --arg head "$head_sha" --arg target "$target_sha" \
-    --argjson is_merge_repair "$is_merge_repair" --slurpfile conflicts "$RUN/conflict-paths.json" \
+    --argjson is_merge_repair "$is_merge_repair" --argjson is_feedback_repair "$is_feedback_repair" \
+    --slurpfile feedback "$SCRATCH/feedback.json" --slurpfile existing "$RUN/feedback-existing-paths.json" --slurpfile conflicts "$RUN/conflict-paths.json" \
     --slurpfile original "$RUN/original-pr-paths.json" --rawfile changed "$RUN/working-tree-paths" '
     ($changed | split("\u0000") | map(select(length > 0))) as $paths |
     {comparison_base_sha: $base, head_sha: $head, target_sha: $target,
       original_pr_paths: $original[0], working_tree_paths: $paths,
-      scope_kind: (if $is_merge_repair then "merge_repair" else "full_review" end), conflict_paths: $conflicts[0],
-      required_paths: (((if $is_merge_repair then $conflicts[0] else $original[0] end) + $paths) | unique)}' > "$destination"
+      scope_kind: (if $is_feedback_repair then "feedback_repair" elif $is_merge_repair then "merge_repair" else "full_review" end), conflict_paths: $conflicts[0],
+      required_paths: (((if $is_feedback_repair then $conflicts[0] + $existing[0] + [$feedback[0][] | .Path | select(length > 0)] elif $is_merge_repair then $conflicts[0] else $original[0] end) + $paths) | unique)}' > "$destination"
 }
 
+is_feedback_repair="$(jq -r '.IsFeedbackRepair // false' "$RUN/plan.json")"
 is_merge_repair="$(jq -r '.IsMergeRepair // false' "$RUN/plan.json")"
 printf '[]\n' > "$RUN/conflict-paths.json"
+printf '[]\n' > "$RUN/feedback-existing-paths.json"
 is_validation_only="$(jq -r '.IsValidationOnly' "$RUN/plan.json")"
 is_rereview="$(jq -r '.IsRereview // false' "$RUN/plan.json")"
-head_sha="$(git -C "$ROOT" rev-parse HEAD)"
-test "$head_sha" = "$(cat "$JOB/base-sha")" || { echo 'Unexpected commit before review' >&2; exit 6; }
-test "$head_sha" = "$(jq -r '.HeadSha' "$RUN/plan.json")" || { echo 'Checkout differs from the assigned PR head' >&2; exit 6; }
+head_sha="$(jq -er '.HeadSha' "$RUN/plan.json")"
+[[ "$head_sha" =~ ^[a-f0-9]{40}$ ]] || exit 6
+if test "$is_report_retry" = true; then
+  git -C "$ROOT" merge-base --is-ancestor "$head_sha" HEAD || { echo 'Saved PR head is no longer in the workspace history' >&2; exit 13; }
+else
+  test "$head_sha" = "$(cat "$JOB/base-sha")" || { echo 'Unexpected commit before review' >&2; exit 6; }
+  test "$head_sha" = "$(git -C "$ROOT" rev-parse HEAD)" || { echo 'Checkout differs from the assigned PR head' >&2; exit 6; }
+fi
 test "$head_sha" = "$(jq -r '.Context.PullRequest.head.sha' "$RUN/plan.json")" || { echo 'PR head changed before review; preserve the checkout for inspection' >&2; exit 6; }
 test "$(jq -r '.Context.PullRequest.state' "$RUN/plan.json")" = open || { echo 'PR is no longer open; preserving work' >&2; exit 6; }
 test "$TARGET" = "$(jq -r '.Context.PullRequest.base.ref' "$RUN/plan.json")" || { echo 'PR target branch changed before review' >&2; exit 6; }
-git -C "$ROOT" fetch --no-tags origin "refs/heads/$TARGET" >/dev/null
-target_sha="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
 expected_target_sha="$(jq -er '.Context.TargetSha' "$RUN/plan.json")"
-test "$target_sha" = "$expected_target_sha" || { echo "Target changed while preparing review context: expected $expected_target_sha, fetched $target_sha" >&2; exit 6; }
+if test "$is_report_retry" = true; then
+  target_sha="$(jq -er '.target_sha' "$source_run/manifest.json")"
+  [[ "$target_sha" =~ ^[a-f0-9]{40}$ ]] || exit 13
+  git -C "$ROOT" cat-file -e "$target_sha^{commit}"
+  test "$TARGET" = "$(jq -er '.Context.PullRequest.base.ref' "$source_run/plan.json")" || {
+    echo 'Saved report belongs to a different target branch' >&2; exit 13;
+  }
+else
+  git -C "$ROOT" fetch --no-tags origin "refs/heads/$TARGET" >/dev/null
+  target_sha="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
+  test "$target_sha" = "$expected_target_sha" || { echo "Target changed while preparing review context: expected $expected_target_sha, fetched $target_sha" >&2; exit 6; }
+fi
 if test "$is_validation_only" = true || test "$is_rereview" = true; then
   if test -s "$JOB/session-id"; then session="$(cat "$JOB/session-id")"; fi
+fi
+if test "$is_feedback_repair" = true; then
+  # Include unfinished edits since the last accepted snapshot in this repair's scope
+  feedback_base="$(cat "$JOB/tree" 2>/dev/null || true)"
+  if test -z "$feedback_base"; then
+    if jq -e '.PublishedSha == null' "$RUN/plan.json" >/dev/null; then
+      feedback_base="$(jq -er '.PriorReview.TreeSha' "$RUN/plan.json")"
+    else
+      feedback_base="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+    fi
+  fi
+  [[ "$feedback_base" =~ ^[a-f0-9]{40}$ ]] && git -C "$ROOT" cat-file -e "$feedback_base^{tree}" || {
+    echo 'Last accepted feedback baseline is unavailable; preserve the workspace for inspection' >&2; exit 13;
+  }
+  feedback_entry="$(fingerprint)"
+  git -C "$ROOT" diff --no-renames --name-only -z "$feedback_base" "$feedback_entry" > "$RUN/feedback-existing-paths"
+  jq -Rs 'split("\u0000") | map(select(length > 0))' "$RUN/feedback-existing-paths" > "$RUN/feedback-existing-paths.json"
 fi
 if test "$is_validation_only" != true; then
   if test -f "$ROOT/.git/MERGE_HEAD"; then
@@ -212,6 +276,9 @@ if test "$is_validation_only" != true; then
 fi
 [[ -z "$session" || "$session" =~ ^[A-Za-z0-9_-]{6,128}$ ]] || { echo 'Invalid saved Codex session' >&2; exit 6; }
 integration_sha="$(cat "$JOB/target-sha" 2>/dev/null || true)"
+if test "$is_report_retry" = true; then
+  integration_sha="$(jq -r '.integration_target_sha // empty' "$source_run/manifest.json")"
+fi
 comparison_sha="$(git -C "$ROOT" merge-base "$head_sha" "$target_sha")"
 git -C "$ROOT" diff --no-renames --name-only -z "$comparison_sha" "$head_sha" > "$RUN/original-pr-paths"
 jq -Rs 'split("\u0000") | map(select(length > 0))' "$RUN/original-pr-paths" > "$RUN/original-pr-paths.json"
@@ -220,7 +287,7 @@ jq --arg head "$head_sha" --arg target "$target_sha" --arg base "$comparison_sha
 mv "$RUN/manifest.tmp" "$RUN/manifest.json"
 
 scope_instructions="Full original PR scope remains required; complete missing cleanup, optimization, and memory work and account for every required path."
-if test "$is_merge_repair" = true; then
+if test "$is_merge_repair" = true || test "$is_feedback_repair" = true; then
   git -C "$ROOT" diff --name-only --diff-filter=U -z > "$RUN/conflict-paths"
   jq -Rs 'split("\u0000") | map(select(length > 0))' "$RUN/conflict-paths" > "$RUN/conflict-paths.json"
   scope_base_tree="$(fingerprint)"
@@ -229,7 +296,15 @@ if test "$is_merge_repair" = true; then
   mv "$RUN/manifest.tmp" "$RUN/manifest.json"
 fi
 
-if test "$(jq -r '.IsReportRetry // false' "$RUN/plan.json")" = true; then
+if test "$is_feedback_repair" = true; then
+  jq -e 'length > 0 and all(.[]; (.Key | type == "string") and (.Path | type == "string" and (startswith("/") | not) and (split("/") | all(. != ".."))))' "$SCRATCH/feedback.json" >/dev/null
+  scope_instructions="Handle only the captured CodeRabbit batch in $SCRATCH/feedback.json, conflict paths and subsequent repairs. Read prior-review.json for historical coverage. Record one disposition for each exact comment version in evidence/feedback-dispositions.json. Do not repeat the original full PR review."
+  jq --arg session "$RUN" --slurpfile feedback "$SCRATCH/feedback.json" \
+    '.kind = "feedback_repair" | .feedback_session_id = $session | .feedback = [$feedback[0][] | {key: .Key, version: .Version, url: .Url}]' "$RUN/manifest.json" > "$RUN/manifest.tmp"
+  mv "$RUN/manifest.tmp" "$RUN/manifest.json"
+fi
+
+if test "$is_report_retry" = true; then
 {{ReportRetry}}
 else
 step_count="$(jq '.Steps | length' "$RUN/plan.json")"
@@ -281,7 +356,7 @@ CPR_REVIEW_CONTEXT
     jq --arg path "$ATTEMPT" '.attempts += [$path] | .current_attempt = $path' "$RUN/manifest.json" > "$RUN/manifest.tmp"
     mv "$RUN/manifest.tmp" "$RUN/manifest.json"
 
-    command=(codex --ask-for-approval never -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write --add-dir /state/cargo)
+    command=(codex --ask-for-approval never -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write --add-dir /state/cargo --add-dir "$SCRATCH")
     if test -n "$session"; then command+=(resume); fi
     command+=(--json --model "$model" -c "model_reasoning_effort=\"$effort\"" --output-schema "$RUN/result.schema.json" --output-last-message "$ATTEMPT/result.json")
     if test -n "$session"; then command+=("$session"); fi
@@ -333,13 +408,18 @@ done
 fi
 
 test ! -f "$JOB/cancel-$operation" || exit 130
-test "$(git -C "$ROOT" rev-parse HEAD)" = "$head_sha" || { echo 'Review created an unauthorized commit' >&2; exit 6; }
-review_tree="$(fingerprint)"
-test "$review_tree" = "$output_tree" || { echo 'Working tree changed after the final validation attempt' >&2; exit 13; }
+test "$(git -C "$ROOT" rev-parse HEAD)" = "${workspace_head:-$head_sha}" || { echo 'Checkout history changed during report validation' >&2; exit 6; }
+test "$(fingerprint)" = "${workspace_tree:-$output_tree}" || { echo 'Working tree changed after the final validation attempt' >&2; exit 13; }
+review_tree="$output_tree"
 cp "$ATTEMPT/result.json" "$RUN/result.json"
 jq -r -f "$RUN/report-result.jq" "$RUN/result.json" > "$RUN/report.md"
-GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" diff --cached --binary HEAD > "$RUN/changes.patch"
-GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" diff --cached --stat HEAD > "$RUN/changes.stat"
-jq --arg tree "$review_tree" --arg session "$session" '.reviewed_tree = $tree | .session_id = $session' "$RUN/manifest.json" > "$RUN/manifest.tmp"
+git -C "$ROOT" diff --binary "$head_sha" "$review_tree" > "$RUN/changes.patch"
+git -C "$ROOT" diff --stat "$head_sha" "$review_tree" > "$RUN/changes.stat"
+jq --arg tree "$review_tree" --arg session "$session" --argjson historical "$is_historical_report" '.reviewed_tree = $tree | .session_id = $session | .is_historical = $historical' "$RUN/manifest.json" > "$RUN/manifest.tmp"
 mv "$RUN/manifest.tmp" "$RUN/manifest.json"
+if test "$is_feedback_repair" = true; then
+  jq --slurpfile dispositions "$SCRATCH/evidence/feedback-dispositions.json" \
+    '.feedback_dispositions = $dispositions[0]' "$RUN/manifest.json" > "$RUN/manifest.tmp"
+  mv "$RUN/manifest.tmp" "$RUN/manifest.json"
+fi
 review_status=validated

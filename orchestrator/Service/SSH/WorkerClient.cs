@@ -27,6 +27,11 @@ namespace CPR.Service.SSH
 			string tempFields = ReadResource( "commit-message.jq" ) + "\n" + ReadResource( "report-fields.jq" );
 			string tempReview = ReadResource( "run-review.sh" )
 				.Replace( "{{ReportRepair}}", ReadResource( "repair-report.sh" ), StringComparison.Ordinal )
+				.Replace( "{{ReportRecovery}}", ReadResource( "recover-report.sh" ), StringComparison.Ordinal )
+				.Replace( "{{ReportRecoverySchema}}", ReadResource( "report-recovery.schema.json" ), StringComparison.Ordinal )
+				.Replace( "{{ApplyReportRecovery}}", ReadResource( "apply-report-recovery.jq" ), StringComparison.Ordinal )
+				.Replace( "{{SavedValidation}}", ReadResource( "validate-saved-report.sh" ), StringComparison.Ordinal )
+				.Replace( "{{SavedValidationSchema}}", ReadResource( "saved-validation.schema.json" ), StringComparison.Ordinal )
 				.Replace( "{{ReportRetry}}", ReadResource( "retry-report.sh" ), StringComparison.Ordinal )
 				.Replace( "{{NormalizeCoverage}}", ReadResource( "normalize-coverage.jq" ), StringComparison.Ordinal )
 				.Replace( "{{ReportFieldsValidation}}", tempFields + "\nreport_fields", StringComparison.Ordinal )
@@ -34,11 +39,12 @@ namespace CPR.Service.SSH
 				.Replace( "{{ResultSchema}}", ReadResource( "result.schema.json" ), StringComparison.Ordinal )
 				.Replace( "{{ResultValidation}}", tempFields + "\n" + ReadResource( "validate-result.jq" ), StringComparison.Ordinal )
 				.Replace( "{{ResultReport}}", ReadResource( "report-result.jq" ), StringComparison.Ordinal )
+				.Replace( "{{FeedbackValidation}}", ReadResource( "validate-feedback.jq" ), StringComparison.Ordinal )
 				.Replace( "{{ScopeValidation}}", ReadResource( "validate-scope.jq" ), StringComparison.Ordinal )
 				.Replace( "{{UsageReport}}", ReadResource( "record-usage.jq" ), StringComparison.Ordinal );
-			string tempCommands = $"is_preserved={( tPlan.IsReportRetry ? 1 : 0 )}\nis_review={( tPlan.IsValidationOnly ? 0 : 1 )}\n{PREPARE_COMMANDS}\n{tempReview}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}\nrm -f \"$JOB/tweak-base.json\"";
-			int tempRepairBudget = tPlan.ReportRepairStep is null ? 0 : ( tPlan.ReportRepairStep.TimeoutSeconds + 15 ) * tPlan.ReportRepairStep.MaxAttempts;
-			int tempTimeout = tPlan.IsReportRetry ? tempRepairBudget + 600 : tPlan.Steps.Sum( x => ( x.TimeoutSeconds + 15 + tempRepairBudget ) * x.MaxAttempts ) + 600;
+			string tempCommands = $"is_feedback={( tPlan.IsFeedbackRepair ? 1 : 0 )}\nis_preserved={( tPlan.IsReportRetry || ( tPlan.IsFeedbackRepair && tRequest.WorkspaceWorkerId is not null && tRequest.PublishedSha is null ) ? 1 : 0 )}\nis_review={( tPlan.IsValidationOnly ? 0 : 1 )}\n{PREPARE_COMMANDS}\n{tempReview}\nif test \"$is_historical_report\" = true; then\n  printf 'CPR_RESULT|%s|%s|%s|%s|true\\n' \"$review_tree\" \"$session\" \"$target_sha\" \"${{RUN##*/}}\"\nelse\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}\nrm -f \"$JOB/tweak-base.json\"\nfi";
+			int tempRepairBudget = ( tPlan.ReportRepairStep is null ? 0 : ( tPlan.ReportRepairStep.TimeoutSeconds + 15 ) * tPlan.ReportRepairStep.MaxAttempts ) + ( tPlan.RecoveryStep is null ? 0 : tPlan.RecoveryStep.TimeoutSeconds + 15 );
+			int tempTimeout = tPlan.IsReportRetry ? tempRepairBudget + tPlan.SavedValidationStep.TimeoutSeconds + 615 : tPlan.Steps.Any( x => x.TimeoutSeconds == 0 ) ? 0 : tPlan.Steps.Sum( x => ( x.TimeoutSeconds + 15 + tempRepairBudget ) * x.MaxAttempts ) + 600;
 			string tempOutput = await RunAsync( tWorker, tRequest, "run", tempCommands, JsonSerializer.Serialize( tPlan ), tempTimeout, tCancel );
 
 			return ParseSnapshot( tempOutput );
@@ -154,11 +160,19 @@ namespace CPR.Service.SSH
 			// Consume stdin before executing, keeping large review context out of process arguments
 			string tempRemote = "bash -c 'eval \"$(cat)\"' -- " + string.Join( ' ', tempArguments.Select( Encode ) );
 			string tempInput = $"DATA64={Encode( tData )}\nis_unlocked={( tOperation == "cancel" ? 1 : 0 )}\n{PREAMBLE}\n{tCommands}\n";
-			CommandResult tempResult = await tCommand.RunAsync( "ssh", [ "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-T", tWorker.SshHost, tempRemote ], tInput: tempInput, tTimeoutSeconds: tTimeoutSeconds, tCancel: tCancel );
+			CommandResult tempResult = await tCommand.RunAsync( "ssh", [ "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-T", tWorker.SshHost, tempRemote ], tInput: tempInput, tTimeoutSeconds: tTimeoutSeconds, tCancel: tCancel );
 
 			if ( !tempResult.IsSuccess )
 			{
-				throw new InvalidOperationException( $"Worker {tWorker.WorkerId} {tOperation} failed: {tempResult.Failure}" );
+				string tempFailure = tempResult.Failure;
+				int tempDiagnosis = tempFailure.LastIndexOf( "Recovery diagnosis [", StringComparison.Ordinal );
+
+				if ( tempDiagnosis >= 0 )
+				{
+					tempFailure = tempFailure[ tempDiagnosis.. ];
+				}
+
+				throw new InvalidOperationException( $"Worker {tWorker.WorkerId} {tOperation} failed: {tempFailure}" );
 			}
 
 			return tempResult.Output;
@@ -183,12 +197,12 @@ namespace CPR.Service.SSH
 			string tempLine = tOutput.Split( '\n' ).LastOrDefault( x => x.StartsWith( "CPR_RESULT|", StringComparison.Ordinal ) ) ?? throw new InvalidOperationException( "Missing worker snapshot result" );
 			string[] tempParts = tempLine.Trim().Split( '|' );
 
-			if ( tempParts.Length != 5 || !Regex.IsMatch( tempParts[ 4 ], "^[A-Za-z0-9_-]{1,128}$" ) || !Regex.IsMatch( tempParts[ 1 ], "^[a-f0-9]{40}$" ) || !Regex.IsMatch( tempParts[ 3 ], "^[a-f0-9]{40}$" ) )
+			if ( tempParts.Length != 6 || tempParts[ 5 ] is not ( "true" or "false" ) || !Regex.IsMatch( tempParts[ 4 ], "^[A-Za-z0-9_-]{1,128}$" ) || !Regex.IsMatch( tempParts[ 1 ], "^[a-f0-9]{40}$" ) || !Regex.IsMatch( tempParts[ 3 ], "^[a-f0-9]{40}$" ) )
 			{
 				throw new InvalidOperationException( "Invalid worker tree SHA" );
 			}
 
-			return new( tempParts[ 1 ], string.IsNullOrWhiteSpace( tempParts[ 2 ] ) ? null : tempParts[ 2 ], tempParts[ 3 ], tempParts[ 4 ] );
+			return new( tempParts[ 1 ], string.IsNullOrWhiteSpace( tempParts[ 2 ] ) ? null : tempParts[ 2 ], tempParts[ 3 ], tempParts[ 4 ], tempParts[ 5 ] == "true" );
 		}
 
 		private const string PREAMBLE = """
@@ -243,6 +257,13 @@ namespace CPR.Service.SSH
 			  echo 'Unexpected workspace path: preserving it' >&2; exit 5
 			fi
 			stored="$WORKSPACES/$ID/repo"
+			if test "${is_feedback:-0}" = 1 && test -d "$stored/.git"; then
+			  if ! test -f "$JOB/published"; then
+			    is_preserved=1
+			  else
+			    test -z "$(git -C "$stored" status --porcelain --untracked-files=normal)" || { echo "Unpublished edits remain after publication; preserving them for manual reconciliation" >&2; exit 5; }
+			  fi
+			fi
 			is_stale=0
 			if test "${is_review:-0}" = 1 && test -d "$stored/.git"; then
 			  expected_head="$(decode "$DATA64" | jq -r '.HeadSha')"
@@ -319,7 +340,7 @@ namespace CPR.Service.SSH
 			mv "$JOB/commit.json.tmp" "$JOB/commit.json"
 			cp "$RUN/report.md" "$JOB/report.md"
 			printf '%s\n' "$tree" > "$JOB/tree"
-			printf 'CPR_RESULT|%s|%s|%s|%s\n' "$tree" "$session" "$target_sha" "${RUN##*/}"
+			printf 'CPR_RESULT|%s|%s|%s|%s|false\n' "$tree" "$session" "$target_sha" "${RUN##*/}"
 			""";
 
 		private const string COMMIT_COMMANDS = """

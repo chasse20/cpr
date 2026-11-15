@@ -57,7 +57,9 @@ tempBuilder.Services.AddSingleton<GitPublisher>();
 tempBuilder.Services.AddSingleton<CleanupService>();
 tempBuilder.Services.AddSingleton<ReviewHistoryService>();
 tempBuilder.Services.AddScoped<ReviewService>();
-tempBuilder.Services.AddHostedService<QueueService>();
+tempBuilder.Services.AddSingleton<QueueService>();
+tempBuilder.Services.AddHostedService( x => x.GetRequiredService<QueueService>() );
+tempBuilder.Services.AddHostedService<FeedbackService>();
 tempBuilder.Services.AddHostedService<ReviewCommentService>();
 tempBuilder.Services.AddHttpClient( "Discord", tClient =>
 {

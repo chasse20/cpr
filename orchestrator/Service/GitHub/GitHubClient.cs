@@ -94,6 +94,100 @@ namespace CPR.Service.GitHub
 			}
 		}
 
+
+		private readonly Dictionary<string, FeedbackPage> _feedbackPages = [];
+
+		public void PruneFeedbackCache( IEnumerable<(string Repository, int Number)> tRequests )
+		{
+			HashSet<string> tempPaths = [ .. tRequests.SelectMany( x => new[] { $"repos/{x.Repository}/issues/{x.Number}/comments?", $"repos/{x.Repository}/pulls/{x.Number}/comments?", $"repos/{x.Repository}/pulls/{x.Number}/reviews?" } ) ];
+
+			foreach ( string tempPath in _feedbackPages.Keys.Where( x => !tempPaths.Any( x.StartsWith ) ).ToArray() )
+			{
+				_feedbackPages.Remove( tempPath );
+			}
+		}
+
+		public async Task<FeedbackComment[]> ReadFeedbackAsync( string tRepository, int tNumber, CancellationToken tCancel )
+		{
+			List<FeedbackComment> tempComments = [];
+			(string Kind, string Path)[] tempSources =
+			[
+				("discussion", $"repos/{tRepository}/issues/{tNumber}/comments"),
+				("inline", $"repos/{tRepository}/pulls/{tNumber}/comments"),
+				("review", $"repos/{tRepository}/pulls/{tNumber}/reviews")
+			];
+
+			foreach ( (string tempKind, string tempPath) in tempSources )
+			{
+				int tempPage = 1;
+				bool tempIsNext = true;
+
+				while ( tempIsNext )
+				{
+					FeedbackPage tempResponse = await ReadFeedbackPageAsync( $"{tempPath}?per_page=100&page={tempPage}", tCancel );
+					tempIsNext = tempResponse.IsNextPage;
+					++tempPage;
+
+					foreach ( JsonElement tempItem in tempResponse.Comments )
+					{
+						if ( tempItem.TryGetProperty( "user", out JsonElement tempUser ) && Get( tempUser, "login" ).Equals( "coderabbitai[bot]", StringComparison.OrdinalIgnoreCase ) && Get( tempUser, "type" ) == "Bot" && !string.IsNullOrWhiteSpace( Get( tempItem, "body" ) ) && Get( tempItem, "state" ) is not ( "PENDING" or "DISMISSED" ) )
+						{
+							string tempBody = Get( tempItem, "body" );
+							string tempFile = Get( tempItem, "path" );
+							string tempCommit = Get( tempItem, "commit_id" );
+							string tempVersion = Convert.ToHexStringLower( System.Security.Cryptography.SHA256.HashData( Encoding.UTF8.GetBytes( JsonSerializer.Serialize( new[] { tempBody, tempFile, tempCommit } ) ) ) );
+							tempComments.Add( new( $"{tempKind}:{tempItem.GetProperty( "id" ).GetInt64()}", tempVersion, Get( tempItem, "html_url" ), tempBody, tempFile, tempCommit ) );
+						}
+					}
+				}
+			}
+
+			return [ .. tempComments ];
+		}
+
+		private async Task<FeedbackPage> ReadFeedbackPageAsync( string tPath, CancellationToken tCancel )
+		{
+			_feedbackPages.TryGetValue( tPath, out FeedbackPage? tempCached );
+			List<string> tempArguments = [ "api", "--include", tPath ];
+
+			if ( !string.IsNullOrEmpty( tempCached?.ETag ) )
+			{
+				tempArguments.AddRange( [ "-H", $"If-None-Match: {tempCached.ETag}" ] );
+			}
+
+			CommandResult tempResult = await tCommand.RunAsync( "gh", [ .. tempArguments ], tTimeoutSeconds: 45, tCancel: tCancel );
+			string tempOutput = tempResult.Output.Replace( "\r\n", "\n", StringComparison.Ordinal );
+			int tempBoundary = tempOutput.IndexOf( "\n\n", StringComparison.Ordinal );
+			string tempHeaders = tempBoundary >= 0 ? tempOutput[ ..tempBoundary ] : tempOutput;
+
+			if ( Regex.IsMatch( tempHeaders, @"\AHTTP/\S+ 304\b" ) && tempCached is not null )
+			{
+				return tempCached;
+			}
+
+			if ( !tempResult.IsSuccess || !Regex.IsMatch( tempHeaders, @"\AHTTP/\S+ 200\b" ) || tempBoundary < 0 )
+			{
+				throw new InvalidOperationException( $"GitHub feedback lookup failed: {tempResult.Failure}" );
+			}
+
+			using JsonDocument tempDocument = JsonDocument.Parse( tempOutput[ ( tempBoundary + 2 ).. ] );
+			string tempETag = Regex.Match( tempHeaders, @"(?im)^etag:\s*([^\n]+)" ).Groups[ 1 ].Value.Trim();
+			bool tempIsNext = Regex.Match( tempHeaders, @"(?im)^link:\s*([^\n]+)" ).Groups[ 1 ].Value.Contains( "rel=\"next\"", StringComparison.Ordinal );
+			FeedbackPage tempPage = new( tempETag, tempIsNext, [ .. tempDocument.RootElement.EnumerateArray().Select( x => x.Clone() ) ] );
+			_feedbackPages[ tPath ] = tempPage;
+
+			return tempPage;
+		}
+
+		public async Task<(string HeadSha, bool? IsComplete)> ReadCodeRabbitStatusAsync( string tRepository, int tNumber, CancellationToken tCancel )
+		{
+			JsonElement tempResult = await ReadJsonAsync( [ "pr", "view", $"https://github.com/{tRepository}/pull/{tNumber}", "--json", "headRefOid,statusCheckRollup" ], tCancel );
+			JsonElement[] tempChecks = [ .. tempResult.GetProperty( "statusCheckRollup" ).EnumerateArray().Where( x => ( Get( x, "name" ) + Get( x, "context" ) ).Contains( "coderabbit", StringComparison.OrdinalIgnoreCase ) ) ];
+			bool? tempIsComplete = tempChecks.Length == 0 ? null : tempChecks.All( x => Get( x, "status" ) == "COMPLETED" || Get( x, "state" ) is "SUCCESS" or "FAILURE" or "ERROR" );
+
+			return (Get( tempResult, "headRefOid" ), tempIsComplete);
+		}
+
 		public async Task<JsonElement> ReadReviewContextAsync( string tUrl, CancellationToken tCancel )
 		{
 			(string tempRepository, int tempNumber) = Parse( tUrl );

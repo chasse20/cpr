@@ -14,6 +14,9 @@ namespace CPR.Service.Review
 		Rereview,
 		TweakSummary,
 		ReportRepair,
-		MergeRepair
+		ReportRecovery,
+		SavedValidation,
+		MergeRepair,
+		FeedbackRepair
 	}
 }

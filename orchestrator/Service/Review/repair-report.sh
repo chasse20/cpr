@@ -6,6 +6,10 @@ normalize_report() {
   jq --argjson is_scope false --slurpfile result "$ATTEMPT/result-before-repair.json" \
     -f "$RUN/normalize-coverage.jq" "$ATTEMPT/result.json" > "$ATTEMPT/normalized.json" || return
   mv "$ATTEMPT/normalized.json" "$ATTEMPT/result.json" || return
+  if ! cmp -s "$ATTEMPT/result-before-repair.json" "$ATTEMPT/result.json"; then
+    jq '.report_normalization = "Normalized historical coverage references or non-process visual inspection metadata; original report and check outcomes retained"' \
+      "$ATTEMPT/attempt.json" > "$ATTEMPT/attempt.tmp" && mv "$ATTEMPT/attempt.tmp" "$ATTEMPT/attempt.json" || return
+  fi
   audit="$(jq -r '.scope_audit // empty' "$ATTEMPT/result.json")" || return
   if test -n "$audit"; then
     cp "$SCRATCH/$audit" "$ATTEMPT/scope-before-repair.json" || return
@@ -31,7 +35,7 @@ write_publication_text() {
     -f "$RUN/validate-result.jq" "$repair/preflight.json" >/dev/null &&
     check_artifacts >/dev/null && check_scope >/dev/null && check_worktree >/dev/null || return 1
   current_tree="$(fingerprint)" || return
-  test "$current_tree" = "$output_tree" && test "$(git -C "$ROOT" rev-parse HEAD)" = "$head_sha" || return 1
+  test "$current_tree" = "${workspace_tree:-$output_tree}" && test "$(git -C "$ROOT" rev-parse HEAD)" = "${workspace_head:-$head_sha}" || return 1
 
   repair_model="$(jq -er '.ReportRepairStep.Model' "$RUN/plan.json")" || return
   repair_effort="$(jq -er '.ReportRepairStep.ReasoningEffort' "$RUN/plan.json")" || return
@@ -64,7 +68,7 @@ write_publication_text() {
   test "$code" = 0 || return "$code"
   test ! -f "$JOB/cancel-$operation" || return 130
   current_tree="$(fingerprint)" || return
-  test "$current_tree" = "$output_tree" && test "$(git -C "$ROOT" rev-parse HEAD)" = "$head_sha" || {
+  test "$current_tree" = "${workspace_tree:-$output_tree}" && test "$(git -C "$ROOT" rev-parse HEAD)" = "${workspace_head:-$head_sha}" || {
     echo 'Working tree changed during report writing; preserving saved review' >&2; return 1;
   }
   jq -e 'type == "object" and (keys == ["commit_message", "pr_comment"]) and (.pr_comment | type == "string") and (.commit_message | type == "string")' "$repair/result.json" >/dev/null || return
@@ -79,13 +83,19 @@ complete_report() {
   if check_report > "$ATTEMPT/gate.txt" 2>&1; then return 0; fi
   jq -e '.outcome == "complete"' "$ATTEMPT/result.json" >/dev/null || return 1
   cp "$ATTEMPT/gate.txt" "$ATTEMPT/gate-before-repair.txt" || return
-  normalize_report || return
-  if check_report > "$ATTEMPT/gate.txt" 2>&1; then return 0; fi
+  if normalize_report; then
+    if check_report > "$ATTEMPT/gate.txt" 2>&1; then return 0; fi
+  fi
   local repair_attempt repair_attempts
   repair_attempts="$(jq -r '.ReportRepairStep.MaxAttempts // 0' "$RUN/plan.json")" || return
   for ((repair_attempt=1; repair_attempt<=repair_attempts; ++repair_attempt)); do
-    write_publication_text "$repair_attempt" || return
+    if ! write_publication_text "$repair_attempt"; then break; fi
     if check_report > "$ATTEMPT/gate.txt" 2>&1; then return 0; fi
   done
-  return 1
+  if jq -e '.RecoveryStep != null' "$RUN/plan.json" >/dev/null; then
+    recover_report
+  else
+    echo 'Automatic diagnosis is disabled; inspect the completion errors and retained evidence before retrying' >> "$ATTEMPT/gate.txt"
+    return 1
+  fi
 }

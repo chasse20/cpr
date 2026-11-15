@@ -175,6 +175,7 @@ namespace CPR.Service.Queue
 					tempRequest.PreparedReviewRunId = null;
 					tempRequest.ApprovedSha = null;
 					tempRequest.LastError = "File cleanup pending";
+					tempRequest.ReviewFeedback = "{}";
 					await tContext.SaveChangesAsync( tCancel );
 
 					return;
@@ -320,7 +321,7 @@ namespace CPR.Service.Queue
 			}
 		}
 
-		private async Task ScheduleAsync( CancellationToken tCancel )
+		public async Task ScheduleAsync( CancellationToken tCancel )
 		{
 			if ( !_settings.IsWorkerExecutionEnabled )
 			{
@@ -336,7 +337,7 @@ namespace CPR.Service.Queue
 				List<Worker> tempFree = await tempContext.Worker.Where( x => x.Status == WorkerStatus.Online && x.PullRequest == null ).OrderBy( x => x.WorkerId ).ToListAsync( tCancel );
 				List<PullRequest> tempJobs = await tempContext.PullRequest
 					.Where( x => x.WorkerId == null && ( x.Status == PullRequestStatus.WaitingToBeProcessed || ( _settings.IsPublicationEnabled && x.Status == PullRequestStatus.ReadyForApproval && x.ApprovedSha != null ) ) )
-					.OrderBy( x => x.ApprovedSha != null ? 0 : x.WorkReason == PullRequestWorkReason.ManualTweak || x.WorkReason == PullRequestWorkReason.Interactive || x.WorkReason == PullRequestWorkReason.CiRecovery || x.WorkReason == PullRequestWorkReason.Rereview || x.WorkReason == PullRequestWorkReason.ReportRetry ? 1 : x.WorkReason == PullRequestWorkReason.MergeConflict ? 2 : 3 )
+					.OrderBy( x => x.ApprovedSha != null ? 0 : x.WorkReason == PullRequestWorkReason.ManualTweak || x.WorkReason == PullRequestWorkReason.Interactive || x.WorkReason == PullRequestWorkReason.CiRecovery || x.WorkReason == PullRequestWorkReason.Rereview || x.WorkReason == PullRequestWorkReason.ReportRetry || x.WorkReason == PullRequestWorkReason.FeedbackRepair ? 1 : x.WorkReason == PullRequestWorkReason.MergeConflict ? 2 : 3 )
 					.ThenBy( x => x.PullRequestId ).ToListAsync( tCancel );
 				List<PullRequest> tempReviews = [];
 
@@ -418,16 +419,17 @@ namespace CPR.Service.Queue
 					return;
 				}
 
+				ReviewService tempReview = tempScope.ServiceProvider.GetRequiredService<ReviewService>();
+
 				if ( tempRequest.WorkReason is PullRequestWorkReason.CiRecovery or PullRequestWorkReason.Interactive or PullRequestWorkReason.ManualTweak )
 				{
 					// Interactive work starts only after cpr connect
-					await tWorkers.PrepareInteractiveAsync( tempWorker, tempRequest, tCancel );
+					await tempReview.PrepareInteractiveAsync( tempWorker, tempRequest, tCancel );
 					tLogger.LogInformation( "PR {Id} prepared for interactive work on worker {Worker}", tId, tWorkerId );
 
 					return;
 				}
 
-				ReviewService tempReview = tempScope.ServiceProvider.GetRequiredService<ReviewService>();
 				WorkerSnapshot tempResult = await tempReview.ExecuteAsync( tempWorker, tempRequest, false, tCancel );
 				await tGate.Mutex.WaitAsync( tCancel );
 

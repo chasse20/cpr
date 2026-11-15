@@ -8,9 +8,14 @@ namespace CPR.Service.Review
 	{
 		public static async Task<ReviewReport> GetFullReportAsync( Context tContext, PullRequest tRequest, CancellationToken tCancel )
 		{
+			return await FindFullReportAsync( tContext, tRequest, tCancel ) ?? throw new InvalidOperationException( "No completed full review report is available; recover the saved report before completing tweaks" );
+		}
+
+		public static async Task<ReviewReport?> FindFullReportAsync( Context tContext, PullRequest tRequest, CancellationToken tCancel )
+		{
 			List<ReviewRun> tempRuns = await tContext.ReviewRun.AsNoTracking().Where( x => x.PullRequestId == tRequest.PullRequestId ).OrderByDescending( x => x.ReviewRunId ).ToListAsync( tCancel );
 
-			return FindReport( tempRuns, true ) ?? throw new InvalidOperationException( "The first approval requires a completed full review report; run cpr review before completing tweaks" );
+			return FindReport( tempRuns, true );
 		}
 
 		public static async Task<long> PrepareAsync( Context tContext, PullRequest tRequest, WorkerSnapshot tSnapshot, CancellationToken tCancel )
@@ -68,7 +73,7 @@ namespace CPR.Service.Review
 				tempBody = tempPublication.GetProperty( "body" ).GetString()!;
 				ValidateBody( tempBody, 60000 );
 			}
-			else if ( IsManual( tempRoot.GetProperty( "manifest" ) ) )
+			else if ( IsSupplement( tempRoot.GetProperty( "manifest" ) ) )
 			{
 				throw new InvalidOperationException( "Complete a new cpr connect --tweak session to prepare the full report and session summaries" );
 			}
@@ -88,7 +93,7 @@ namespace CPR.Service.Review
 				throw new InvalidOperationException( "Report was prepared for a different publication; complete a fresh review or tweak session" );
 			}
 
-			if ( IsManual( tempManifest ) )
+			if ( IsSupplement( tempManifest ) )
 			{
 				long tempBoundary = tRuns.Where( x => IsPublished( x ) ).Select( x => x.ReviewRunId ).DefaultIfEmpty().Max();
 				List<ReviewRun> tempPending = [ .. tRuns.Where( x => x.ReviewRunId > tempBoundary ).OrderBy( x => x.ReviewRunId ) ];
@@ -103,33 +108,33 @@ namespace CPR.Service.Review
 
 				if ( tempReport is not null )
 				{
-					tempParts.Add( $"{tempReport.Body}\n\n---\n\nThe report above applies to the saved review tree `{tempReport.TreeSha}`. Subsequent manual changes are recorded below; the full review was not rerun for those changes." );
+					tempParts.Add( $"{tempReport.Body}\n\n---\n\nThe report above applies to the saved review tree `{tempReport.TreeSha}`. Subsequent focused repairs and manual changes are recorded below; the full review was not rerun for those changes." );
 					tempBoundary = tempReport.ReviewRunId;
 				}
 
 				// A retried completion replaces only its own session summary
-				Dictionary<string, (long Id, string Body)> tempSessions = [];
+				Dictionary<string, (long Id, string Body, bool IsManual)> tempSessions = [];
 
 				foreach ( ReviewRun tempPendingRun in tempPending.Where( x => x.ReviewRunId > tempBoundary ) )
 				{
 					using JsonDocument tempPendingDocument = JsonDocument.Parse( tempPendingRun.Details );
 					JsonElement tempPendingManifest = tempPendingDocument.RootElement.GetProperty( "manifest" );
 
-					if ( IsComplete( tempPendingManifest ) && IsManual( tempPendingManifest ) && tempPendingManifest.TryGetProperty( "tweak_session_id", out JsonElement tempSession ) && tempPendingManifest.GetProperty( "previous_published_sha" ).GetString() == tRequest.PublishedSha )
+					if ( IsComplete( tempPendingManifest ) && IsSupplement( tempPendingManifest ) && tempPendingManifest.TryGetProperty( IsManual( tempPendingManifest ) ? "tweak_session_id" : "feedback_session_id", out JsonElement tempSession ) && tempPendingManifest.GetProperty( "previous_published_sha" ).GetString() == tRequest.PublishedSha )
 					{
 						string tempSessionBody = ReadBody( tempPendingRun, tempPendingManifest.GetProperty( "head_sha" ).GetString()!, tempPendingManifest.GetProperty( "reviewed_tree" ).GetString()!, tempPendingManifest.GetProperty( "target_sha" ).GetString()! );
-						tempSessions[ tempSession.GetString()! ] = (tempPendingRun.ReviewRunId, tempSessionBody);
+						tempSessions[ tempSession.GetString()! ] = (tempPendingRun.ReviewRunId, tempSessionBody, IsManual( tempPendingManifest ));
 					}
 				}
 
 				int tempIndex = 0;
 
-				foreach ( (long _, string tempSessionBody) in tempSessions.Values.OrderBy( x => x.Id ) )
+				foreach ( (long _, string tempSessionBody, bool tempIsManual) in tempSessions.Values.OrderBy( x => x.Id ) )
 				{
-					tempParts.Add( $"## Tweak session {++tempIndex}\n\n{tempSessionBody}" );
+					tempParts.Add( $"## {( tempIsManual ? "Tweak session" : "CodeRabbit repair" )} {++tempIndex}\n\n{tempSessionBody}" );
 				}
 
-				tempParts.Add( "CPR checked the final Git snapshot and target integration. Tweak checks are reported per session; no automated review or test suite was rerun on exit." );
+				tempParts.Add( "CPR checked the final Git snapshot and target integration. Each session reports its own checks and scope; the original full review was not repeated." );
 				tempBody = string.Join( "\n\n", tempParts );
 				ValidateBody( tempBody, 60000 );
 			}
@@ -144,7 +149,7 @@ namespace CPR.Service.Review
 				using JsonDocument tempDocument = JsonDocument.Parse( tempRun.Details );
 				JsonElement tempRoot = tempDocument.RootElement;
 
-				if ( tempRoot.TryGetProperty( "manifest", out JsonElement tempManifest ) && IsComplete( tempManifest ) && !IsManual( tempManifest ) && ( !tIsFullRequired || !tempManifest.TryGetProperty( "report_kind", out JsonElement tempKind ) || tempKind.GetString() == "full_review" ) && tempRoot.TryGetProperty( "result", out JsonElement tempResult ) && tempResult.ValueKind == JsonValueKind.Object && tempResult.TryGetProperty( "pr_comment", out JsonElement tempComment ) && tempComment.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace( tempComment.GetString() ) )
+				if ( tempRoot.TryGetProperty( "manifest", out JsonElement tempManifest ) && IsComplete( tempManifest ) && !IsSupplement( tempManifest ) && ( !tIsFullRequired || !tempManifest.TryGetProperty( "report_kind", out JsonElement tempKind ) || tempKind.GetString() == "full_review" ) && tempRoot.TryGetProperty( "result", out JsonElement tempResult ) && tempResult.ValueKind == JsonValueKind.Object && tempResult.TryGetProperty( "pr_comment", out JsonElement tempComment ) && tempComment.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace( tempComment.GetString() ) )
 				{
 					string tempHead = tempManifest.GetProperty( "head_sha" ).GetString()!;
 					string tempTarget = tempManifest.GetProperty( "target_sha" ).GetString()!;
@@ -167,6 +172,11 @@ namespace CPR.Service.Review
 		private static bool IsComplete( JsonElement tManifest )
 		{
 			return tManifest.ValueKind == JsonValueKind.Object && tManifest.TryGetProperty( "status", out JsonElement tempStatus ) && tempStatus.GetString() == "complete";
+		}
+
+		private static bool IsSupplement( JsonElement tManifest )
+		{
+			return IsManual( tManifest ) || ( tManifest.TryGetProperty( "kind", out JsonElement tempKind ) && tempKind.GetString() == "feedback_repair" ) || ( tManifest.TryGetProperty( "review_scope", out JsonElement tempScope ) && tempScope.GetString() == "feedback_repair" );
 		}
 
 		private static bool IsManual( JsonElement tManifest )

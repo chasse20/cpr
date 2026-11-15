@@ -42,6 +42,8 @@ namespace CPR.SQL
 		public string? LastError { get; set; }
 		[MaxLength( 16000 )]
 		public string? MaintainerResolution { get; set; }
+		[Required, Column( TypeName = "jsonb" )]
+		public string ReviewFeedback { get; set; } = "{}";
 		public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 		public DateTimeOffset? CompletedAt { get; set; }
 		public DateTimeOffset? CleanupRequestedAt { get; set; }

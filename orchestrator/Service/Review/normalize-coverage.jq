@@ -8,4 +8,7 @@ def normalize:
 		else . end
 	else . end;
 if $is_scope then .files |= map(.rules |= map_values(normalize))
-else .coverage |= map_values(normalize) end
+else
+	.coverage |= map_values(normalize)
+	| .checks |= map(if .status == "passed" and .exit_code == null and (.command | test("^view_image\\s")) then .kind = "inspection" else . end)
+end

@@ -8,6 +8,7 @@ namespace CPR.SQL
 		Interactive,
 		Rereview,
 		ManualTweak,
-		ReportRetry
+		ReportRetry,
+		FeedbackRepair
 	}
 }

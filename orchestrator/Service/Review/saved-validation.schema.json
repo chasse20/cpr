@@ -1,0 +1,24 @@
+{
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"is_validated",
+		"summary",
+		"issues"
+	],
+	"properties": {
+		"is_validated": {
+			"type": "boolean"
+		},
+		"summary": {
+			"type": "string",
+			"maxLength": 2000
+		},
+		"issues": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			}
+		}
+	}
+}

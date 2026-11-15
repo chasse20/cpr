@@ -5,7 +5,11 @@ namespace CPR.Service.Command
 		public async Task<CommandResult> RunAsync( string tExecutable, IEnumerable<string> tArguments, string? tInput = null, int tTimeoutSeconds = 120, CancellationToken tCancel = default )
 		{
 			using CancellationTokenSource tempTimeout = CancellationTokenSource.CreateLinkedTokenSource( tCancel );
-			tempTimeout.CancelAfter( TimeSpan.FromSeconds( tTimeoutSeconds ) );
+
+			if ( tTimeoutSeconds != 0 )
+			{
+				tempTimeout.CancelAfter( TimeSpan.FromSeconds( tTimeoutSeconds ) );
+			}
 
 			ProcessStartInfo tempInfo = new( tExecutable )
 			{

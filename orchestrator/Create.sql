@@ -101,6 +101,9 @@ ALTER TABLE cpr."ReviewRun" ADD COLUMN IF NOT EXISTS "CommentAttemptedAt" timest
 ALTER TABLE cpr."ReviewRun" ADD COLUMN IF NOT EXISTS "CommentPublishedAt" timestamp with time zone NULL;
 CREATE INDEX IF NOT EXISTS "IX_ReviewRun_PendingComment" ON cpr."ReviewRun" ( "ReviewRunId" ) WHERE "PublishedSha" IS NOT NULL AND "CommentId" IS NULL AND "CommentBody" IS NOT NULL;
 
+-- Track observed CodeRabbit versions and one pending focused repair across restarts
+ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "ReviewFeedback" jsonb NOT NULL DEFAULT '{}'::jsonb;
+
 -- WorkerStatus: Online = 0, Offline = 1, Paused = 2
 INSERT INTO cpr."Worker" ( "WorkerId", "SshHost", "Status" )
 VALUES

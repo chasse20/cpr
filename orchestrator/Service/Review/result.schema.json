@@ -36,9 +36,10 @@
 			"items": {
 				"type": "object",
 				"additionalProperties": false,
-				"required": ["id", "command", "status", "exit_code", "is_required", "is_baseline_failure", "details", "artifact"],
+				"required": ["id", "kind", "command", "status", "exit_code", "is_required", "is_baseline_failure", "details", "artifact"],
 				"properties": {
 					"id": { "type": "string" },
+					"kind": { "type": "string", "enum": ["command", "inspection"] },
 					"command": { "type": "string" },
 					"status": { "type": "string", "enum": ["passed", "failed", "blocked", "not_run"] },
 					"exit_code": { "type": ["integer", "null"] },

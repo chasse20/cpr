@@ -1,0 +1,92 @@
+{
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"category",
+		"summary",
+		"next_action",
+		"reference_repairs"
+	],
+	"properties": {
+		"category": {
+			"type": "string",
+			"enum": [
+				"report_metadata",
+				"missing_evidence",
+				"unfinished_review",
+				"required_check",
+				"integration",
+				"infrastructure",
+				"maintainer_decision"
+			]
+		},
+		"summary": {
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 2000
+		},
+		"next_action": {
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 1000
+		},
+		"reference_repairs": {
+			"type": "array",
+			"maxItems": 16,
+			"items": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"path",
+					"area",
+					"failed_check",
+					"passed_check",
+					"before_excerpt",
+					"after_excerpt",
+					"reason"
+				],
+				"properties": {
+					"area": {
+						"type": "string",
+						"enum": [
+							"correctness",
+							"resources",
+							"cleanup",
+							"final_diff",
+							"naming",
+							"spacing",
+							"comments",
+							"organization",
+							"optimization",
+							"memory"
+						]
+					},
+					"failed_check": {
+						"type": "string"
+					},
+					"passed_check": {
+						"type": "string"
+					},
+					"before_excerpt": {
+						"type": "string",
+						"minLength": 8,
+						"maxLength": 1000
+					},
+					"after_excerpt": {
+						"type": "string",
+						"minLength": 8,
+						"maxLength": 1000
+					},
+					"reason": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 1000
+					},
+					"path": {
+						"type": "string"
+					}
+				}
+			}
+		}
+	}
+}

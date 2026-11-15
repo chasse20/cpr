@@ -169,6 +169,11 @@ case "$command_name" in
       "Next: \(.nextAction)",
       (if .prComment != null then "PR comment preview: cpr show \(.id) --comment" else empty end),
       (if .lastError != null then "Reason: \(.lastError)" else empty end),
+      (if .codeRabbit != null then
+        "CodeRabbit: \(if .isCodeRabbitEnabled == false then "disabled" elif .codeRabbit.isInitialized then "watching" else "initializing" end); \(.codeRabbit.pending | length) comments pending",
+        (if .codeRabbit.lastAttemptAt != null then "  Last repair: \(.codeRabbit.lastAttemptAt); \(.codeRabbit.lastBatch | length) comments" else empty end),
+        (if .codeRabbit.lastError != null then "  Feedback: \(.codeRabbit.lastError)" else empty end)
+       else empty end),
       (if .maintainerResolution != null then "Maintainer resolution: \(.maintainerResolution)" else empty end),
       (if .cleanupRequestedAt != null then "Files: \(if .cleanedAt != null then "deleted" else "cleanup pending on workers " + (.storageWorkerIds | map(tostring) | join(", ")) end)" else empty end),
       . as $pr |
@@ -180,12 +185,18 @@ case "$command_name" in
            else "delivery pending" end)
          else empty end),
         (.details |
-        "\nRun \(.key): \(.manifest.status // "unknown")\(if .manifest.kind == "manual_tweak" then " (manual tweaks; no automated review)" elif .manifest.kind == "report_retry" then " (report retry; saved review reused)" elif .manifest.kind == "merge_repair" then " (focused merge repair)" else "" end)",
+        "\nRun \(.key): \(.manifest.status // "unknown")\(if .manifest.kind == "manual_tweak" then " (manual tweaks; no automated review)" elif .manifest.kind == "report_retry" then " (report recovery; saved review reused)" elif .manifest.kind == "merge_repair" then " (focused merge repair)" elif .manifest.kind == "feedback_repair" or .manifest.review_scope == "feedback_repair" then " (CodeRabbit repair)" else "" end)",
+        (if .manifest.is_historical == true then "  Historical report: retained original snapshot; subsequent changes need their own integration checks" else empty end),
         (if .manifest.maintainer_resolution != null then "  Maintainer resolution: \(.manifest.maintainer_resolution)" else empty end),
         (.attempts[]? | "  \(.step // "unknown") attempt \(.attempt // "?"): \(.model // "?") / \(.reasoning_effort // "?")  \(.status // "unknown"); \(usage_summary)",
+          (.report_normalization? // empty | "    Report repair: " + .),
+          (.report_recovery? | select(. != null) | "    Automatic recovery: \(.model) / \(.reasoning_effort)  \(.status); \(usage_summary)",
+            (.diagnosis? | select(. != null) | "      Reason [\(.category)]: \(.summary)", "      Next: \(.next_action)")),
+          (.saved_validation? | select(. != null) | "    Saved-evidence validation: \(.model) / \(.reasoning_effort)  \(.status); \(usage_summary)"),
           (.report_repairs[]? | "    Report writing: \(.model) / \(.reasoning_effort)  \(.status); \(usage_summary)"),
           (.result // {} | (.summary // .capture_error // empty | "    Result: " + .),
             (.findings[]? | "    Finding [\(.severity)] \(.location): \(.impact)"))),
+        (.manifest.feedback_dispositions[]? | "CodeRabbit [\(.status)] \(.key): \(.reason)"),
         (.result // {} | .summary // empty,
           (if (.commit_message // "") != "" then "Proposed commit:\n" + .commit_message else empty end),
           ((.coverage // {}) | to_entries[] | "Coverage [\(.key)]: \(.value.status) — \(.value.details)"),
@@ -226,7 +237,12 @@ case "$command_name" in
       jq -e '.supportsTweak == true' <<< "$current" >/dev/null || fail 'Server does not support connect --tweak; update the CPR orchestrator first.'
       endpoint+='?tweak=true'
     fi
-    result=$(request POST "$endpoint")
+    if [[ $is_tweak == true ]]; then
+      printf 'Preparing manual session; recovering any saved final report without repeating review...\n'
+      result=$(request POST "$endpoint" '' 600)
+    else
+      result=$(request POST "$endpoint")
+    fi
     if [[ $is_tweak == true ]]; then
       jq -e '.isTweak == true' <<< "$result" >/dev/null || fail 'Server did not prepare a tweak session.'
     elif [[ $(jq -r '.isTweak // false' <<< "$result") == true ]]; then

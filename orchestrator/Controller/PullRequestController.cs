@@ -133,7 +133,7 @@ namespace CPR.Controller
 			{
 				PullRequestStatus.Merged or PullRequestStatus.Closed => tempRequest.CleanedAt is null ? "Automatic file cleanup pending" : "Complete; database history retained",
 				PullRequestStatus.Removed => tempRequest.CleanupRequestedAt is not null && tempRequest.CleanedAt is null ? "File cleanup pending" : "Use review to resume tracking, or purge to delete saved files",
-				PullRequestStatus.Blocked => "Use retry for a failed final report, connect --tweak for target integration after a completed review, or review to reassess code",
+				PullRequestStatus.Blocked => "Use connect --tweak to recover the saved report and integrate the target, retry for report-only recovery, or review to reassess code",
 				PullRequestStatus.ReadyForApproval => tempRequest.ApprovedSha is null ? "Inspect this review and checkout, then approve or review again" : "Approved; waiting to publish",
 				PullRequestStatus.CiFailure => "CI reruns are polled automatically; use review or connect for code repairs",
 				PullRequestStatus.ReadyToBeMerged => "Merge on GitHub when ready; CPR does not merge automatically",
@@ -164,6 +164,8 @@ namespace CPR.Controller
 				tempRequest.CleanedAt,
 				tempRequest.LastError,
 				tempRequest.MaintainerResolution,
+				IsCodeRabbitEnabled = tSettings.Value.IsCodeRabbitEnabled && tSettings.Value.IsWorkerExecutionEnabled && tSettings.Value.FeedbackRepairStep.IsEnabled && tempRequest.Status is not ( PullRequestStatus.Merged or PullRequestStatus.Closed or PullRequestStatus.Removed ),
+				CodeRabbit = JsonSerializer.Deserialize<FeedbackState>( tempRequest.ReviewFeedback ),
 				NextAction = tempNext,
 				SupportsTweak = true,
 				Runs = tempRuns.Select( x => new { x.ReviewRunId, x.WorkerId, x.PublishedSha, x.CommentId, x.CommentError, x.CommentAttemptedAt, x.CommentPublishedAt, Details = JsonSerializer.Deserialize<JsonElement>( x.Details ) } )
@@ -497,7 +499,7 @@ namespace CPR.Controller
 			try
 			{
 				// Preserve interrupted work and verify the checkout before returning its SSH host
-				string? tempSession = await tWorkers.PrepareInteractiveAsync( tempRequest.Worker, tempRequest, tCancel );
+				string? tempSession = await tReviews.PrepareInteractiveAsync( tempRequest.Worker, tempRequest, tCancel );
 
 				PullRequest? tempCurrent = await tContext.PullRequest.Include( x => x.Worker ).AsNoTracking().SingleOrDefaultAsync( x => x.PullRequestId == tId, tCancel );
 
