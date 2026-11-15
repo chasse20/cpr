@@ -30,13 +30,68 @@ namespace CPR.Service.GitHub
 
 			using JsonDocument tempDocument = JsonDocument.Parse( tempResult.Output );
 			JsonElement tempRoot = tempDocument.RootElement;
-			string tempHeadRepository = tempRoot.TryGetProperty( "headRepository", out JsonElement tempHead ) && tempHead.ValueKind == JsonValueKind.Object && tempHead.TryGetProperty( "nameWithOwner", out JsonElement tempFull ) ? tempFull.GetString() ?? tempRepository : tempRepository;
+			string tempHeadRepository = tempRoot.TryGetProperty( "headRepository", out JsonElement tempHead ) && tempHead.ValueKind == JsonValueKind.Object && tempHead.TryGetProperty( "nameWithOwner", out JsonElement tempFull ) ? tempFull.GetString() ?? "" : "";
 			string tempState = Get( tempRoot, "state" );
 			string tempTarget = Get( tempRoot, "baseRefName" );
 			string tempTargetSha = tempState == "OPEN" ? await ReadTargetShaAsync( tempRepository, tempTarget, tCancel ) : Get( tempRoot, "baseRefOid" );
 			DateTimeOffset? tempCompletedAt = tempRoot.TryGetProperty( tempState == "MERGED" ? "mergedAt" : "closedAt", out JsonElement tempDate ) && tempDate.ValueKind == JsonValueKind.String && tempDate.TryGetDateTimeOffset( out DateTimeOffset tempTime ) ? tempTime : null;
 
 			return new( tempRepository, tempNumber, tempTarget, tempHeadRepository.ToLowerInvariant(), Get( tempRoot, "headRefName" ), Get( tempRoot, "headRefOid" ), tempState, tempRoot.TryGetProperty( "isDraft", out JsonElement tempDraft ) && tempDraft.ValueKind == JsonValueKind.True, Get( tempRoot, "mergeable" ), Get( tempRoot, "mergeStateStatus" ), tempRoot.TryGetProperty( "isCrossRepository", out JsonElement tempCross ) && tempCross.ValueKind == JsonValueKind.True, tempCompletedAt, tempTargetSha );
+		}
+
+		public async Task VerifyPublicationAccessAsync( GitHubPullRequest tExpected, CancellationToken tCancel )
+		{
+			(string tempRepository, int tempNumber) = Parse( tExpected.Url );
+			string[] tempParts = tempRepository.Split( '/' );
+			const string QUERY = """
+				query($owner: String!, $name: String!, $number: Int!) {
+				  repository(owner: $owner, name: $name) {
+				    viewerPermission
+				    pullRequest(number: $number) {
+				      state baseRefName baseRef { target { oid } }
+				      headRefName headRefOid maintainerCanModify
+				      headRepository { nameWithOwner viewerPermission isInOrganization }
+				    }
+				  }
+				}
+				""";
+			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "api", "graphql", "-f", $"query={QUERY}", "-f", $"owner={tempParts[ 0 ]}", "-f", $"name={tempParts[ 1 ]}", "-F", $"number={tempNumber.ToString( CultureInfo.InvariantCulture )}" ], tTimeoutSeconds: 45, tCancel: tCancel );
+
+			if ( !tempResult.IsSuccess )
+			{
+				throw new InvalidOperationException( $"Unable to verify GitHub publication access: {tempResult.Failure}" );
+			}
+
+			using JsonDocument tempDocument = JsonDocument.Parse( tempResult.Output );
+			VerifyPublicationAccess( tempDocument.RootElement, tExpected );
+		}
+
+		private static void VerifyPublicationAccess( JsonElement tRoot, GitHubPullRequest tExpected )
+		{
+			JsonElement tempRepository = tRoot.GetProperty( "data" ).GetProperty( "repository" );
+
+			if ( tempRepository.ValueKind != JsonValueKind.Object || !tempRepository.TryGetProperty( "pullRequest", out JsonElement tempRequest ) || tempRequest.ValueKind != JsonValueKind.Object || !tempRequest.TryGetProperty( "headRepository", out JsonElement tempHead ) || tempHead.ValueKind != JsonValueKind.Object || string.IsNullOrWhiteSpace( Get( tempHead, "nameWithOwner" ) ) )
+			{
+				throw new InvalidOperationException( "PR source repository is unavailable; it may have been deleted or access was revoked" );
+			}
+
+			string tempTargetSha = tempRequest.TryGetProperty( "baseRef", out JsonElement tempBase ) && tempBase.ValueKind == JsonValueKind.Object && tempBase.TryGetProperty( "target", out JsonElement tempTarget ) && tempTarget.ValueKind == JsonValueKind.Object ? Get( tempTarget, "oid" ) : "";
+
+			if ( Get( tempRequest, "state" ) != "OPEN" || Get( tempRequest, "headRefName" ) != tExpected.HeadBranch || Get( tempRequest, "headRefOid" ) != tExpected.HeadSha || Get( tempRequest, "baseRefName" ) != tExpected.TargetBranch || string.IsNullOrEmpty( tempTargetSha ) || tempTargetSha != tExpected.TargetSha || !string.Equals( Get( tempHead, "nameWithOwner" ), tExpected.HeadRepository, StringComparison.OrdinalIgnoreCase ) )
+			{
+				throw new InvalidOperationException( "PR head or target changed while checking publication access; request fresh approval" );
+			}
+
+			bool tempIsHeadWritable = Get( tempHead, "viewerPermission" ) is "WRITE" or "MAINTAIN" or "ADMIN";
+			bool tempIsUpstreamWritable = Get( tempRepository, "viewerPermission" ) is "WRITE" or "MAINTAIN" or "ADMIN";
+			bool tempIsMaintainerEditAllowed = tempRequest.TryGetProperty( "maintainerCanModify", out JsonElement tempModification ) && tempModification.ValueKind == JsonValueKind.True;
+			bool tempIsPersonalFork = !string.Equals( tExpected.Repository, tExpected.HeadRepository, StringComparison.OrdinalIgnoreCase ) && tempHead.TryGetProperty( "isInOrganization", out JsonElement tempOrganization ) && tempOrganization.ValueKind == JsonValueKind.False;
+
+			// Maintainer edits grant access to this PR branch, not write access to the whole fork
+			if ( !tempIsHeadWritable && !( tempIsPersonalFork && tempIsUpstreamWritable && tempIsMaintainerEditAllowed ) )
+			{
+				throw new InvalidOperationException( $"Cannot publish to {tExpected.HeadRepository}:{tExpected.HeadBranch}: CPR's GitHub account needs write access to the source repository, or upstream write access with 'Allow edits from maintainers' enabled on a personal fork. Check the configured GitHub token's repository access" );
+			}
 		}
 
 		public async Task<JsonElement> ReadReviewContextAsync( string tUrl, CancellationToken tCancel )
@@ -111,7 +166,9 @@ namespace CPR.Service.GitHub
 
 		public async Task<CIResult> ReadCIAsync( string tUrl, GitHubPullRequest tExpected, bool tIsCheckRequired, CancellationToken tCancel )
 		{
-			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "pr", "checks", tUrl, "--required", "--json", "name,bucket,state" ], tTimeoutSeconds: 45, tCancel: tCancel );
+			// Every reported check counts, including checks not required by branch protection
+			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "pr", "checks", tUrl, "--json", "name,bucket,state" ], tTimeoutSeconds: 45, tCancel: tCancel );
+			string[] tempBuckets = ReadCheckBuckets( tempResult );
 			GitHubPullRequest tempCurrent = await ReadAsync( tUrl, tCancel );
 
 			if ( tempCurrent.State != "OPEN" || tempCurrent.HeadSha != tExpected.HeadSha || tempCurrent.TargetBranch != tExpected.TargetBranch || tempCurrent.TargetSha != tExpected.TargetSha || tempCurrent.HeadBranch != tExpected.HeadBranch || !string.Equals( tempCurrent.HeadRepository, tExpected.HeadRepository, StringComparison.OrdinalIgnoreCase ) )
@@ -119,37 +176,83 @@ namespace CPR.Service.GitHub
 				throw new InvalidOperationException( "PR changed while reading CI; check again before advancing" );
 			}
 
-			// GitHub returns JSON even when checks are pending or failed
-			if ( string.IsNullOrWhiteSpace( tempResult.Output ) )
-			{
-				if ( tempResult.IsSuccess )
-				{
-					return tIsCheckRequired ? CIResult.Pending : CIResult.Passed;
-				}
-
-				throw new InvalidOperationException( $"Unable to obtain required CI checks: {tempResult.Failure}" );
-			}
-
-			using JsonDocument tempDocument = JsonDocument.Parse( tempResult.Output );
-
-			if ( tempDocument.RootElement.ValueKind != JsonValueKind.Array )
-			{
-				throw new InvalidOperationException( "Invalid GitHub checks response" );
-			}
-
-			string[] tempBuckets = [ .. tempDocument.RootElement.EnumerateArray().Select( x => Get( x, "bucket" ).ToLowerInvariant() ) ];
-
 			if ( tempBuckets.Length == 0 )
 			{
 				return tIsCheckRequired ? CIResult.Pending : CIResult.Passed;
 			}
 
-			if ( tempBuckets.Any( x => x is "fail" or "cancel" ) )
+			if ( tempBuckets.Any( x => x == "fail" ) )
 			{
 				return CIResult.Failed;
 			}
 
-			return tempBuckets.All( x => x is "pass" or "skipping" ) ? CIResult.Passed : CIResult.Pending;
+			return tempBuckets.All( x => x is "pass" or "skipping" or "cancel" ) ? CIResult.Passed : CIResult.Pending;
+		}
+
+		private static string[] ReadCheckBuckets( CommandResult tResult )
+		{
+			if ( string.IsNullOrWhiteSpace( tResult.Output ) )
+			{
+				string tempError = tResult.Error.Trim();
+
+				if ( tResult.IsSuccess || ( tResult.ExitCode == 1 && tempError.StartsWith( "no checks reported on the '", StringComparison.Ordinal ) && tempError.EndsWith( "' branch", StringComparison.Ordinal ) ) )
+				{
+					return [];
+				}
+
+				throw new InvalidOperationException( $"Unable to obtain CI checks: {tResult.Failure}" );
+			}
+
+			// gh uses exit 1 for failed checks and exit 8 for pending checks
+			if ( tResult.ExitCode is not ( 0 or 1 or 8 ) )
+			{
+				throw new InvalidOperationException( $"Unable to obtain CI checks: {tResult.Failure}" );
+			}
+
+			using JsonDocument tempDocument = JsonDocument.Parse( tResult.Output );
+
+			if ( tempDocument.RootElement.ValueKind != JsonValueKind.Array || ( tempDocument.RootElement.GetArrayLength() == 0 && !tResult.IsSuccess ) )
+			{
+				throw new InvalidOperationException( "Invalid GitHub checks response" );
+			}
+
+			return [ .. tempDocument.RootElement.EnumerateArray().Select( x => Get( x, "bucket" ).ToLowerInvariant() ) ];
+		}
+
+		public async Task<long> PublishCommentAsync( string tRepository, int tNumber, string tBody, string tMarker, CancellationToken tCancel )
+		{
+			string tempPath = $"repos/{tRepository}/issues/{tNumber}/comments";
+			JsonElement tempPages = await ReadJsonAsync( [ "api", "--paginate", "--slurp", $"{tempPath}?per_page=100" ], tCancel );
+
+			// Recover a successful submission whose response or database save was lost
+			foreach ( JsonElement tempPage in tempPages.EnumerateArray() )
+			{
+				foreach ( JsonElement tempComment in tempPage.EnumerateArray() )
+				{
+					string tempBody = Get( tempComment, "body" );
+
+					if ( tempBody.Contains( tMarker, StringComparison.Ordinal ) )
+					{
+						if ( tempBody != tBody )
+						{
+							throw new InvalidOperationException( "Existing CPR report has different text; inspect the GitHub comment before retrying" );
+						}
+
+						return tempComment.GetProperty( "id" ).GetInt64();
+					}
+				}
+			}
+
+			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "api", "--method", "POST", tempPath, "--input", "-" ], tInput: JsonSerializer.Serialize( new { body = tBody } ), tTimeoutSeconds: 60, tCancel: tCancel );
+
+			if ( !tempResult.IsSuccess )
+			{
+				throw new InvalidOperationException( $"GitHub PR comment failed: {tempResult.Failure}" );
+			}
+
+			using JsonDocument tempDocument = JsonDocument.Parse( tempResult.Output );
+
+			return tempDocument.RootElement.GetProperty( "id" ).GetInt64();
 		}
 
 		private static string Get( JsonElement tElement, string tProperty )

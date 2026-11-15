@@ -7,13 +7,24 @@ namespace CPR.Service.Queue
 	{
 		public static bool IsSameSource( PullRequest tRequest, GitHubPullRequest tRemote )
 		{
-			return tRemote.State == "OPEN" && tRequest.RemoteSha == tRemote.HeadSha && tRequest.TargetBranch == tRemote.TargetBranch && tRequest.HeadBranch == tRemote.HeadBranch && string.Equals( tRequest.HeadRepository, tRemote.HeadRepository, StringComparison.OrdinalIgnoreCase );
+			return tRequest.RemoteSha == tRemote.HeadSha && IsSameBranch( tRequest, tRemote );
+		}
+
+		public static bool IsSameBranch( PullRequest tRequest, GitHubPullRequest tRemote )
+		{
+			return tRemote.State == "OPEN" && tRequest.TargetBranch == tRemote.TargetBranch && tRequest.HeadBranch == tRemote.HeadBranch && string.Equals( tRequest.HeadRepository, tRemote.HeadRepository, StringComparison.OrdinalIgnoreCase );
+		}
+
+		public static bool IsFollowingCI( PullRequest tRequest )
+		{
+			return tRequest.PublishedSha is not null && tRequest.Status is PullRequestStatus.WaitingForCi or PullRequestStatus.CiFailure or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged;
 		}
 
 		public static void Block( PullRequest tRequest, string tReason )
 		{
 			tRequest.Status = PullRequestStatus.Blocked;
 			tRequest.PreparedSha = null;
+			tRequest.PreparedReviewRunId = null;
 			tRequest.ApprovedSha = null;
 			tRequest.ReviewedTargetSha = null;
 			tRequest.LastError = tReason[ ..Math.Min( 4000, tReason.Length ) ];
@@ -26,7 +37,7 @@ namespace CPR.Service.Queue
 				return new( tRequest.Status, tRequest.WorkReason );
 			}
 
-			// Poll reruns on the published commit; code repair remains an explicit request
+			// Follow CI on the current PR head after publication; code repair remains explicit
 			if ( tChecks == CIResult.Failed )
 			{
 				return new( PullRequestStatus.CiFailure, tRequest.WorkReason );

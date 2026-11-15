@@ -36,7 +36,7 @@ namespace CPR.Service.Review
 
 				if ( !WorkflowRules.IsSameSource( tRequest, tempCurrent ) || tempCurrent.TargetSha != tempResult.TargetSha )
 				{
-					throw new InvalidOperationException( "PR head or target changed during review; request a fresh review" );
+					throw new InvalidOperationException( "PR head or target changed during review; use cpr connect --tweak for manual target integration, or request a fresh review" );
 				}
 
 				return tempResult;
@@ -61,6 +61,41 @@ namespace CPR.Service.Review
 						tGate.Mutex.Release();
 					}
 				}
+			}
+		}
+
+		public async Task<WorkerSnapshot> CompleteTweakAsync( Worker tWorker, PullRequest tRequest, CancellationToken tCancel )
+		{
+			GitHubPullRequest tempRemote = await tGitHub.ReadAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
+
+			if ( !WorkflowRules.IsSameSource( tRequest, tempRemote ) )
+			{
+				throw new InvalidOperationException( "PR head or destination changed; request a fresh review before completing the manual merge" );
+			}
+
+			if ( tRequest.PublishedSha is null )
+			{
+				using IServiceScope tempScope = tScopes.CreateScope();
+				Context tempContext = tempScope.ServiceProvider.GetRequiredService<Context>();
+				await ReviewComment.GetFullReportAsync( tempContext, tRequest, tCancel );
+			}
+
+			try
+			{
+				WorkerSnapshot tempResult = await tWorkers.CompleteTweakAsync( tWorker, tRequest, tempRemote.TargetSha, tCancel );
+				GitHubPullRequest tempCurrent = await tGitHub.ReadAsync( tempRemote.Url, tCancel );
+
+				if ( !WorkflowRules.IsSameSource( tRequest, tempCurrent ) || tempCurrent.TargetSha != tempResult.TargetSha )
+				{
+					throw new InvalidOperationException( "PR head or target changed during manual completion; use cpr connect --tweak again to integrate the latest target" );
+				}
+
+				return tempResult;
+			}
+			finally
+			{
+				using CancellationTokenSource tempCapture = new( TimeSpan.FromSeconds( 90 ) );
+				await tHistory.CaptureAsync( tWorker, tRequest, tempCapture.Token );
 			}
 		}
 
@@ -110,7 +145,7 @@ namespace CPR.Service.Review
 			}
 
 			JsonElement tempContext = await tGitHub.ReadReviewContextAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
-			ReviewPlan tempPlan = new( tRequest.RemoteSha, tIsValidationOnly, tRequest.WorkReason == PullRequestWorkReason.Rereview, tempContext, [ .. tempSteps ], tOperationId, tRequest.MaintainerResolution );
+			ReviewPlan tempPlan = new( tRequest.RemoteSha, tIsValidationOnly, tRequest.WorkReason == PullRequestWorkReason.Rereview, tempContext, [ .. tempSteps ], tOperationId, tRequest.MaintainerResolution, tRequest.PublishedSha );
 
 			return await tWorkers.ExecuteAsync( tWorker, tRequest, tempPlan, tCancel );
 		}

@@ -13,6 +13,14 @@ namespace CPR.SQL
 		public required string RunKey { get; set; }
 		[Required, Column( TypeName = "jsonb" )]
 		public required string Details { get; set; }
+		public string? CommentBody { get; set; }
+		[MaxLength( 64 )]
+		public string? PublishedSha { get; set; }
+		public long? CommentId { get; set; }
+		[MaxLength( 4000 )]
+		public string? CommentError { get; set; }
+		public DateTimeOffset? CommentAttemptedAt { get; set; }
+		public DateTimeOffset? CommentPublishedAt { get; set; }
 		[ForeignKey( nameof( PullRequestId ) )]
 		[DeleteBehavior( DeleteBehavior.Restrict )]
 		public PullRequest? PullRequest { get; set; }

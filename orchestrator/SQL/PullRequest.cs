@@ -31,6 +31,7 @@ namespace CPR.SQL
 		// Prepared and approved snapshots hold Git tree hashes
 		[MaxLength( 64 )]
 		public string? PreparedSha { get; set; }
+		public long? PreparedReviewRunId { get; set; }
 		[MaxLength( 64 )]
 		public string? ReviewedTargetSha { get; set; }
 		[MaxLength( 64 )]

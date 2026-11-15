@@ -6,6 +6,7 @@ namespace CPR.SQL
 		MergeConflict,
 		CiRecovery,
 		Interactive,
-		Rereview
+		Rereview,
+		ManualTweak
 	}
 }

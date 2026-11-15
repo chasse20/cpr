@@ -96,6 +96,7 @@ namespace CPR.Controller
 					tempCurrent.CleanedAt = null;
 					tempCurrent.CleanupRequestedAt = null;
 					tempCurrent.PreparedSha = null;
+					tempCurrent.PreparedReviewRunId = null;
 					tempCurrent.ApprovedSha = null;
 					tempCurrent.ReviewedTargetSha = null;
 					tempCurrent.LastError = null;
@@ -132,7 +133,7 @@ namespace CPR.Controller
 			{
 				PullRequestStatus.Merged or PullRequestStatus.Closed => tempRequest.CleanedAt is null ? "Automatic file cleanup pending" : "Complete; database history retained",
 				PullRequestStatus.Removed => tempRequest.CleanupRequestedAt is not null && tempRequest.CleanedAt is null ? "File cleanup pending" : "Use review to resume tracking, or purge to delete saved files",
-				PullRequestStatus.Blocked => "Use review to reassess the latest PR, or connect to inspect and repair",
+				PullRequestStatus.Blocked => "Use connect --tweak for manual target integration without another review, or review to reassess the latest PR",
 				PullRequestStatus.ReadyForApproval => tempRequest.ApprovedSha is null ? "Inspect this review and checkout, then approve or review again" : "Approved; waiting to publish",
 				PullRequestStatus.CiFailure => "CI reruns are polled automatically; use review or connect for code repairs",
 				PullRequestStatus.ReadyToBeMerged => "Merge on GitHub when ready; CPR does not merge automatically",
@@ -154,6 +155,8 @@ namespace CPR.Controller
 				tempRequest.TargetBranch,
 				tempRequest.ReviewedTargetSha,
 				tempRequest.PreparedSha,
+				tempRequest.PreparedReviewRunId,
+				PrComment = tempRequest.Status == PullRequestStatus.ReadyForApproval ? tempRuns.SingleOrDefault( x => x.ReviewRunId == tempRequest.PreparedReviewRunId )?.CommentBody : null,
 				tempRequest.ApprovedSha,
 				tempRequest.PublishedSha,
 				tempRequest.CompletedAt,
@@ -162,7 +165,8 @@ namespace CPR.Controller
 				tempRequest.LastError,
 				tempRequest.MaintainerResolution,
 				NextAction = tempNext,
-				Runs = tempRuns.Select( x => new { x.WorkerId, Details = JsonSerializer.Deserialize<JsonElement>( x.Details ) } )
+				SupportsTweak = true,
+				Runs = tempRuns.Select( x => new { x.ReviewRunId, x.WorkerId, x.PublishedSha, x.CommentId, x.CommentError, x.CommentAttemptedAt, x.CommentPublishedAt, Details = JsonSerializer.Deserialize<JsonElement>( x.Details ) } )
 			} );
 		}
 
@@ -256,6 +260,7 @@ namespace CPR.Controller
 					tempCurrent.WorkspaceWorkerId ??= tempCurrent.WorkerId;
 					tempCurrent.WorkerId = null;
 					tempCurrent.PreparedSha = null;
+					tempCurrent.PreparedReviewRunId = null;
 					tempCurrent.ApprovedSha = null;
 					tempCurrent.ReviewedTargetSha = null;
 
@@ -384,7 +389,7 @@ namespace CPR.Controller
 		}
 
 		[HttpPost( "{id:long}/connect" )]
-		public async Task<IActionResult> ConnectAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
+		public async Task<IActionResult> ConnectAsync( [FromRoute( Name = "id" )] long tId, [FromQuery( Name = "tweak" )] bool tIsTweak, CancellationToken tCancel )
 		{
 			PullRequest? tempRequest;
 
@@ -415,11 +420,17 @@ namespace CPR.Controller
 					} );
 				}
 
-				if ( tempRequest.Status is PullRequestStatus.CiFailure or PullRequestStatus.Blocked || ( tempRequest.Status == PullRequestStatus.ReadyForApproval && tempRequest.WorkerId is null ) )
+				if ( tIsTweak && tempRequest.WorkspaceWorkerId is null && tempRequest.PublishedSha is null )
 				{
-					tempRequest.WorkReason = tempRequest.Status == PullRequestStatus.CiFailure ? PullRequestWorkReason.CiRecovery : PullRequestWorkReason.Interactive;
+					return Conflict( new { Error = "Manual tweaks require a saved workspace or a previously published CPR review" } );
+				}
+
+				if ( tIsTweak || tempRequest.Status is PullRequestStatus.CiFailure or PullRequestStatus.Blocked || ( tempRequest.Status == PullRequestStatus.ReadyForApproval && tempRequest.WorkerId is null ) )
+				{
+					tempRequest.WorkReason = tIsTweak ? PullRequestWorkReason.ManualTweak : tempRequest.Status == PullRequestStatus.CiFailure ? PullRequestWorkReason.CiRecovery : PullRequestWorkReason.Interactive;
 					tempRequest.Status = tempRequest.WorkerId is null ? PullRequestStatus.WaitingToBeProcessed : PullRequestStatus.Processing;
 					tempRequest.PreparedSha = null;
+					tempRequest.PreparedReviewRunId = null;
 					tempRequest.ReviewedTargetSha = null;
 					tempRequest.ApprovedSha = null;
 					tempRequest.LastError = "Interactive work requested; waiting for worker";
@@ -441,8 +452,15 @@ namespace CPR.Controller
 
 				tempRequest.Status = PullRequestStatus.Processing;
 				tempRequest.PreparedSha = null;
+				tempRequest.PreparedReviewRunId = null;
 				tempRequest.ReviewedTargetSha = null;
-				tempRequest.LastError = "Interactive session requested";
+
+				if ( !tIsTweak && tempRequest.WorkReason == PullRequestWorkReason.ManualTweak )
+				{
+					tempRequest.WorkReason = PullRequestWorkReason.Interactive;
+				}
+
+				tempRequest.LastError = tIsTweak ? "Manual tweak session requested; no automated review on completion" : "Interactive session requested";
 
 				try
 				{
@@ -496,7 +514,7 @@ namespace CPR.Controller
 		}
 
 		[HttpPost( "{id:long}/complete" )]
-		public async Task<IActionResult> CompleteAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
+		public async Task<IActionResult> CompleteAsync( [FromRoute( Name = "id" )] long tId, [FromQuery( Name = "tweak" )] bool tIsTweak, CancellationToken tCancel )
 		{
 			PullRequest? tempRequest;
 
@@ -514,6 +532,11 @@ namespace CPR.Controller
 					} );
 				}
 
+				if ( tIsTweak != ( tempRequest.WorkReason == PullRequestWorkReason.ManualTweak ) )
+				{
+					return Conflict( new { Error = "Session mode changed; reopen the intended connect or connect --tweak session before completing it" } );
+				}
+
 				if ( !tGate.Running.TryAdd( tId, Task.CompletedTask ) )
 				{
 					return Conflict( new
@@ -524,8 +547,9 @@ namespace CPR.Controller
 
 				tempRequest.Status = PullRequestStatus.Processing;
 				tempRequest.PreparedSha = null;
+				tempRequest.PreparedReviewRunId = null;
 				tempRequest.ReviewedTargetSha = null;
-				tempRequest.LastError = "Validating interactive edits";
+				tempRequest.LastError = tempRequest.WorkReason == PullRequestWorkReason.ManualTweak ? "Checking manual tweak snapshot" : "Validating interactive edits";
 
 				try
 				{
@@ -546,7 +570,9 @@ namespace CPR.Controller
 
 			try
 			{
-				WorkerSnapshot tempSnapshot = await tReviews.ExecuteAsync( tempRequest.Worker, tempRequest, true, tCancel );
+				WorkerSnapshot tempSnapshot = tempRequest.WorkReason == PullRequestWorkReason.ManualTweak
+					? await tReviews.CompleteTweakAsync( tempRequest.Worker, tempRequest, tCancel )
+					: await tReviews.ExecuteAsync( tempRequest.Worker, tempRequest, true, tCancel );
 
 				await tGate.Mutex.WaitAsync( tCancel );
 
@@ -562,6 +588,7 @@ namespace CPR.Controller
 						} );
 					}
 
+					tempCurrent.PreparedReviewRunId = await ReviewComment.PrepareAsync( tContext, tempCurrent, tempSnapshot, tCancel );
 					tempCurrent.PreparedSha = tempSnapshot.TreeSha;
 					tempCurrent.ReviewedTargetSha = tempSnapshot.TargetSha;
 					tempCurrent.SessionId = tempSnapshot.SessionId ?? tempCurrent.SessionId;
@@ -641,11 +668,6 @@ namespace CPR.Controller
 					return Conflict( new { Error = "PR must be ReadyForApproval with an unapproved, current snapshot" } );
 				}
 
-				if ( !string.Equals( tempRequest.HeadRepository, tempRequest.Repository, StringComparison.OrdinalIgnoreCase ) )
-				{
-					return Conflict( new { Error = "Fork PR publication is not configured" } );
-				}
-
 				if ( !tGate.Running.TryAdd( tId, Task.CompletedTask ) )
 				{
 					return Conflict( new { Error = "Worker operation is still running" } );
@@ -659,24 +681,27 @@ namespace CPR.Controller
 			try
 			{
 				GitHubPullRequest tempRemote = await tGitHub.ReadAsync( $"https://github.com/{tempRequest.Repository}/pull/{tempRequest.Number}", tCancel );
+				await tGitHub.VerifyPublicationAccessAsync( tempRemote, tCancel );
 				await tGate.Mutex.WaitAsync( tCancel );
 
 				try
 				{
 					PullRequest tempCurrent = await tContext.PullRequest.SingleAsync( x => x.PullRequestId == tId, tCancel );
 
-					if ( tempCurrent.Status != PullRequestStatus.ReadyForApproval || tempCurrent.PreparedSha != tempRequest.PreparedSha || tempCurrent.ApprovedSha is not null )
+					if ( tempCurrent.Status != PullRequestStatus.ReadyForApproval || tempCurrent.PreparedSha != tempRequest.PreparedSha || tempCurrent.PreparedReviewRunId != tempRequest.PreparedReviewRunId || tempCurrent.ApprovedSha is not null )
 					{
 						return Conflict( new { Error = "Review state changed while checking approval" } );
 					}
 
 					if ( !WorkflowRules.IsSameSource( tempCurrent, tempRemote ) || tempCurrent.ReviewedTargetSha != tempRemote.TargetSha )
 					{
-						WorkflowRules.Block( tempCurrent, "PR head or target changed; request a fresh review before approval" );
+						WorkflowRules.Block( tempCurrent, "PR head or target changed; use cpr connect --tweak or request a fresh review before approval" );
 						await tContext.SaveChangesAsync( tCancel );
 
 						return Conflict( new { Error = tempCurrent.LastError } );
 					}
+
+					await ReviewComment.GetPreparedAsync( tContext, tempCurrent, tCancel );
 
 					tempCurrent.ApprovedSha = tempCurrent.PreparedSha;
 					tempCurrent.LastError = null;
@@ -712,7 +737,9 @@ namespace CPR.Controller
 				tRequest.WorkerId,
 				tRequest.WorkspaceWorkerId,
 				tRequest.SessionId,
-				CompletionTimeoutSeconds = ( tempValidation.TimeoutSeconds + 15 ) * tempValidation.MaxAttempts + 1800,
+				tRequest.TargetBranch,
+				IsTweak = tRequest.WorkReason == PullRequestWorkReason.ManualTweak,
+				CompletionTimeoutSeconds = tRequest.WorkReason == PullRequestWorkReason.ManualTweak ? 600 : ( tempValidation.TimeoutSeconds + 15 ) * tempValidation.MaxAttempts + 1800,
 				SshHost = tempWorker?.SshHost,
 				ProjectDirectory = tempWorker is null ? null : $"/workspace/jobs/{tRequest.PullRequestId}/repo",
 				tRequest.LastError
