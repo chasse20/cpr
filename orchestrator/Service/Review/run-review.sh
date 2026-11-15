@@ -9,6 +9,7 @@ decode "$DATA64" > "$RUN/plan.json"
 operation="$(jq -r '.OperationId' "$RUN/plan.json")"
 [[ "$operation" =~ ^[a-f0-9]{32}$ ]] || exit 2
 review_pid=''
+jq '.PriorReview // null' "$RUN/plan.json" > "$SCRATCH/prior-review.json"
 jq '.Context' "$RUN/plan.json" > "$SCRATCH/context.json"
 printf '%s\n' "$RUN" > "$JOB/latest-run"
 review_status=running
@@ -26,6 +27,15 @@ CPR_RESULT_REPORT
 cat > "$RUN/validate-scope.jq" <<'CPR_SCOPE_VALIDATION'
 {{ScopeValidation}}
 CPR_SCOPE_VALIDATION
+cat > "$RUN/normalize-coverage.jq" <<'CPR_NORMALIZE_COVERAGE'
+{{NormalizeCoverage}}
+CPR_NORMALIZE_COVERAGE
+cat > "$RUN/report-fields.jq" <<'CPR_REPORT_FIELDS'
+{{ReportFieldsValidation}}
+CPR_REPORT_FIELDS
+cat > "$RUN/report-repair.schema.json" <<'CPR_REPORT_REPAIR_SCHEMA'
+{{ReportRepairSchema}}
+CPR_REPORT_REPAIR_SCHEMA
 cat > "$RUN/record-usage.jq" <<'CPR_USAGE_REPORT'
 {{UsageReport}}
 CPR_USAGE_REPORT
@@ -81,6 +91,14 @@ finish_review() {
 trap finish_review EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
+if test "$(jq -r '.IsReportRetry // false' "$RUN/plan.json")" = true; then
+  source_run="$previous_run"
+  if test -f "$source_run/manifest.json"; then
+    source_run="$(jq -r --arg source "$source_run" '.report_source_run // $source' "$source_run/manifest.json")"
+  fi
+  jq --arg source "$source_run" '.kind = "report_retry" | .report_source_run = $source' "$RUN/manifest.json" > "$RUN/manifest.tmp"
+  mv "$RUN/manifest.tmp" "$RUN/manifest.json"
+fi
 test ! -f "$JOB/cancel-$operation" || exit 130
 
 # Compile the completion gate before spending a review attempt
@@ -88,26 +106,15 @@ jq --argjson is_final true --argjson is_commit_required true -f "$RUN/validate-r
 jq --argjson scope '[]' --argjson result '[]' -f "$RUN/validate-scope.jq" /dev/null
 
 fingerprint() {
-  GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" read-tree HEAD
-  GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" add -A
-  GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" write-tree
-}
-
-write_review_scope() {
-  local tree="$1" destination="$2"
-  git -C "$ROOT" diff --no-renames --name-only -z "$head_sha" "$tree" > "$RUN/working-tree-paths"
-  jq -n --arg base "$comparison_sha" --arg head "$head_sha" --arg target "$target_sha" \
-    --slurpfile original "$RUN/original-pr-paths.json" --rawfile changed "$RUN/working-tree-paths" '
-    ($changed | split("\u0000") | map(select(length > 0))) as $paths |
-    {comparison_base_sha: $base, head_sha: $head, target_sha: $target,
-      original_pr_paths: $original[0], working_tree_paths: $paths,
-      required_paths: (($original[0] + $paths) | unique)}' > "$destination"
+  GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" read-tree HEAD &&
+    GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" add -A &&
+    GIT_INDEX_FILE="$RUN/worktree.index" git -C "$ROOT" write-tree
 }
 
 check_scope() {
   if test "$is_final" = true; then
     local audit
-    audit="$(jq -r '.scope_audit' "$ATTEMPT/result.json")"
+    audit="$(jq -r '.scope_audit' "$ATTEMPT/result.json")" || return
     jq -e --slurpfile scope "$ATTEMPT/output-scope.json" --slurpfile result "$ATTEMPT/result.json" \
       -f "$RUN/validate-scope.jq" "$SCRATCH/$audit"
   fi
@@ -121,15 +128,60 @@ check_worktree() {
 }
 
 check_artifacts() {
+  local artifact resolved
   while IFS= read -r artifact; do
     if test -n "$artifact"; then
       [[ "$artifact" =~ ^evidence/[A-Za-z0-9_./-]+$ ]] || { echo "Invalid evidence path: $artifact"; return 1; }
       resolved="$(realpath -e -- "$SCRATCH/$artifact")" || return 1
-      [[ "$resolved" == "$SCRATCH/evidence/"* && "$resolved" == "$SCRATCH/$artifact" ]] && test -f "$resolved" || { echo "Evidence must be a regular file at its canonical path: $artifact"; return 1; }
+      [[ "$resolved" == "$SCRATCH/evidence/"* && "$resolved" == "$SCRATCH/$artifact" ]] && test -f "$resolved" || {
+        echo "Evidence must be a regular file at its canonical path: $artifact"; return 1;
+      }
     fi
   done < <(jq -r '.checks[].artifact, (.scope_audit // empty)' "$ATTEMPT/result.json")
 }
 
+check_report() {
+  jq -e --argjson is_final "$is_final" --argjson is_commit_required "$is_commit_required" \
+    -f "$RUN/validate-result.jq" "$ATTEMPT/result.json" &&
+    check_artifacts && check_scope && check_worktree
+}
+
+execute_codex() {
+  local timeout_seconds="$1" directory="$2" prompt="$3" events="$4" stderr="$5" code=0 stat_line
+  local -a fields
+  shift 5
+  exec 8> "$JOB/control-$operation" || return
+  flock 8 || return
+  if test -f "$JOB/cancel-$operation"; then flock -u 8; return 130; fi
+  (cd "$directory" && exec env CPR_REVIEW_OPERATION="$operation" setsid timeout --kill-after=15s "$timeout_seconds" "$@" < "$prompt" > "$events" 2> "$stderr") 8>&- 9>&- &
+  review_pid=$!
+  stat_line="$(cat "/proc/$review_pid/stat" 2>/dev/null || true)"
+  read -r -a fields <<< "${stat_line##*) }"
+  printf '%s %s\n' "$review_pid" "${fields[19]:-0}" > "$JOB/process-$operation"
+  flock -u 8
+  wait "$review_pid" || code=$?
+  review_pid=''
+  rm -f -- "$JOB/process-$operation"
+  return "$code"
+}
+
+{{ReportRepair}}
+
+write_review_scope() {
+  local tree="$1" destination="$2"
+  git -C "$ROOT" diff --no-renames --name-only -z "${scope_base_tree:-$head_sha}" "$tree" > "$RUN/working-tree-paths"
+  jq -n --arg base "$comparison_sha" --arg head "$head_sha" --arg target "$target_sha" \
+    --argjson is_merge_repair "$is_merge_repair" --slurpfile conflicts "$RUN/conflict-paths.json" \
+    --slurpfile original "$RUN/original-pr-paths.json" --rawfile changed "$RUN/working-tree-paths" '
+    ($changed | split("\u0000") | map(select(length > 0))) as $paths |
+    {comparison_base_sha: $base, head_sha: $head, target_sha: $target,
+      original_pr_paths: $original[0], working_tree_paths: $paths,
+      scope_kind: (if $is_merge_repair then "merge_repair" else "full_review" end), conflict_paths: $conflicts[0],
+      required_paths: (((if $is_merge_repair then $conflicts[0] else $original[0] end) + $paths) | unique)}' > "$destination"
+}
+
+is_merge_repair="$(jq -r '.IsMergeRepair // false' "$RUN/plan.json")"
+printf '[]\n' > "$RUN/conflict-paths.json"
 is_validation_only="$(jq -r '.IsValidationOnly' "$RUN/plan.json")"
 is_rereview="$(jq -r '.IsRereview // false' "$RUN/plan.json")"
 head_sha="$(git -C "$ROOT" rev-parse HEAD)"
@@ -167,6 +219,19 @@ jq --arg head "$head_sha" --arg target "$target_sha" --arg base "$comparison_sha
   '.head_sha = $head | .target_sha = $target | .comparison_base_sha = $base | .integration_target_sha = $integration' "$RUN/manifest.json" > "$RUN/manifest.tmp"
 mv "$RUN/manifest.tmp" "$RUN/manifest.json"
 
+scope_instructions="Full original PR scope remains required; complete missing cleanup, optimization, and memory work and account for every required path."
+if test "$is_merge_repair" = true; then
+  git -C "$ROOT" diff --name-only --diff-filter=U -z > "$RUN/conflict-paths"
+  jq -Rs 'split("\u0000") | map(select(length > 0))' "$RUN/conflict-paths" > "$RUN/conflict-paths.json"
+  scope_base_tree="$(fingerprint)"
+  scope_instructions="Review only the conflict paths and subsequent integration repairs in required_paths. Read $SCRATCH/prior-review.json for prior coverage and its revision boundaries. Do not repeat unchanged original PR review or unrelated resource and cleanup passes."
+  jq --arg tree "$scope_base_tree" '.kind = "merge_repair" | .scope_base_tree = $tree' "$RUN/manifest.json" > "$RUN/manifest.tmp"
+  mv "$RUN/manifest.tmp" "$RUN/manifest.json"
+fi
+
+if test "$(jq -r '.IsReportRetry // false' "$RUN/plan.json")" = true; then
+{{ReportRetry}}
+else
 step_count="$(jq '.Steps | length' "$RUN/plan.json")"
 for ((step=0; step<step_count; ++step)); do
   name="$(jq -r --argjson step "$step" '.Steps[$step].Name' "$RUN/plan.json")"
@@ -194,11 +259,11 @@ for ((step=0; step<step_count; ++step)); do
     cat >> "$ATTEMPT/prompt.txt" <<CPR_REVIEW_CONTEXT
 
 CPR execution facts:
-- Publication report_kind: $(jq -r '.report_kind' "$RUN/manifest.json"). For commit_summary, pr_comment covers only the outgoing delta from $head_sha to the final working tree, including integration and checks relevant to those changes. Full original PR review and internal evidence remain required.
+- Publication report_kind: $(jq -r '.report_kind' "$RUN/manifest.json"). For commit_summary, pr_comment covers only the outgoing delta from $head_sha to the final working tree, including integration and checks relevant to those changes. The required internal review scope is defined below; publication summary scope does not change it.
 - Assigned step: $name; final step: $is_final; completing an interactive session: $is_validation_only
 - PR: $(decode "$URL64"); target branch: $TARGET; checkout: $ROOT
 - Original head: $head_sha; current target: $target_sha; comparison base: $comparison_sha; previously integrated target (empty if none): $integration_sha
-- Read $SCRATCH/review-scope.json for the original PR paths and subsequent changes. Full original PR scope remains required during rereview and interactive completion; git diff HEAD alone omits already-committed PR code. Complete missing cleanup, optimization, and memory work, including repairs needed during validation. Account for every required path in scope_audit and include paths added by your repairs.
+- Read $SCRATCH/review-scope.json for the review inventory. $scope_instructions Inspect complete affected functions and necessary callers, and update scope_audit for newly repaired paths.
 - Read $SCRATCH/context.json for captured PR discussion, linked issues, and related PRs. Paginated comment collections contain arrays of pages. Other linked references may require further investigation; report unavailable context explicitly.
 - Previous run (empty if none): $previous_run. Its artifacts and results are read-only historical evidence. Reuse only evidence still valid for the current tree; copy reused evidence into the current evidence directory and update its references.
 - Previous checkout archived when upstream changed (empty if none): $(cat "$JOB/previous-workspace" 2>/dev/null || true). Inspect its unpublished repairs and reapply only those still relevant; preserve the archive.
@@ -222,18 +287,7 @@ CPR_REVIEW_CONTEXT
     if test -n "$session"; then command+=("$session"); fi
     command+=(-)
     exit_code=0
-    exec 8> "$JOB/control-$operation"
-    flock 8
-    test ! -f "$JOB/cancel-$operation" || exit 130
-    (cd "$ROOT" && exec env CPR_REVIEW_OPERATION="$operation" setsid timeout --kill-after=15s "$limit" "${command[@]}" < "$ATTEMPT/prompt.txt" > "$ATTEMPT/events.jsonl" 2> "$ATTEMPT/codex.stderr") 8>&- 9>&- &
-    review_pid=$!
-    stat_line="$(cat "/proc/$review_pid/stat" 2>/dev/null || true)"
-    read -r -a fields <<< "${stat_line##*) }"
-    printf '%s %s\n' "$review_pid" "${fields[19]:-0}" > "$JOB/process-$operation"
-    flock -u 8
-    wait "$review_pid" || exit_code=$?
-    review_pid=''
-    rm -f -- "$JOB/process-$operation"
+    execute_codex "$limit" "$ROOT" "$ATTEMPT/prompt.txt" "$ATTEMPT/events.jsonl" "$ATTEMPT/codex.stderr" "${command[@]}" || exit_code=$?
 
     next_session="$(jq -Rr 'fromjson? | objects | select(.type == "thread.started") | .thread_id // empty' "$ATTEMPT/events.jsonl" | tail -n 1)"
     if [[ "$next_session" =~ ^[A-Za-z0-9_-]{6,128}$ ]]; then
@@ -250,20 +304,23 @@ CPR_REVIEW_CONTEXT
     mv "$ATTEMPT/attempt.tmp" "$ATTEMPT/attempt.json"
     if test "$exit_code" != 0; then echo "Codex step $name exited $exit_code; see $ATTEMPT/codex.stderr" >&2; exit "$exit_code"; fi
     test -s "$ATTEMPT/result.json" || { echo "Missing structured result for $name" >&2; exit 13; }
-    jq -r -f "$RUN/report-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/report.md"
-    cp "$ATTEMPT/report.md" "$JOB/report.md"
-
     is_commit_required=false
     if test "$output_tree" != "$(git -C "$ROOT" rev-parse HEAD^{tree})" || test -f "$ROOT/.git/MERGE_HEAD"; then is_commit_required=true; fi
-    if jq -e --argjson is_final "$is_final" --argjson is_commit_required "$is_commit_required" -f "$RUN/validate-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/gate.txt" 2>&1 &&
-       check_artifacts >> "$ATTEMPT/gate.txt" 2>&1 && check_scope >> "$ATTEMPT/gate.txt" 2>&1 && check_worktree >> "$ATTEMPT/gate.txt" 2>&1; then
+    if complete_report; then
       is_complete=true
     else
       printf '\nCompletion requires coherent check results, retained evidence, and all required final coverage.\n' >> "$ATTEMPT/gate.txt"
     fi
+    jq -r -f "$RUN/report-result.jq" "$ATTEMPT/result.json" > "$ATTEMPT/report.md"
+    cp "$ATTEMPT/report.md" "$JOB/report.md"
     jq --argjson complete "$is_complete" '.is_complete = $complete' "$ATTEMPT/attempt.json" > "$ATTEMPT/attempt.tmp"
     mv "$ATTEMPT/attempt.tmp" "$ATTEMPT/attempt.json"
     if test "$is_complete" = true; then break; fi
+    if jq -e '.outcome == "complete"' "$ATTEMPT/result.json" >/dev/null; then
+      cat "$ATTEMPT/gate.txt" >&2
+      echo "Report validation failed after targeted repair; use cpr retry $ID for a saved final report, or cpr review $ID if code or review work remains" >&2
+      break
+    fi
     if jq -e '.outcome == "blocked" or (.relevance.status | IN("not_needed", "uncertain"))' "$ATTEMPT/result.json" >/dev/null; then break; fi
     previous_attempt="$ATTEMPT"
   done
@@ -273,7 +330,9 @@ CPR_REVIEW_CONTEXT
     exit 13
   fi
 done
+fi
 
+test ! -f "$JOB/cancel-$operation" || exit 130
 test "$(git -C "$ROOT" rev-parse HEAD)" = "$head_sha" || { echo 'Review created an unauthorized commit' >&2; exit 6; }
 review_tree="$(fingerprint)"
 test "$review_tree" = "$output_tree" || { echo 'Working tree changed after the final validation attempt' >&2; exit 13; }

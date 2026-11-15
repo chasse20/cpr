@@ -133,7 +133,7 @@ namespace CPR.Controller
 			{
 				PullRequestStatus.Merged or PullRequestStatus.Closed => tempRequest.CleanedAt is null ? "Automatic file cleanup pending" : "Complete; database history retained",
 				PullRequestStatus.Removed => tempRequest.CleanupRequestedAt is not null && tempRequest.CleanedAt is null ? "File cleanup pending" : "Use review to resume tracking, or purge to delete saved files",
-				PullRequestStatus.Blocked => "Use connect --tweak for manual target integration without another review, or review to reassess the latest PR",
+				PullRequestStatus.Blocked => "Use retry for a failed final report, connect --tweak for target integration after a completed review, or review to reassess code",
 				PullRequestStatus.ReadyForApproval => tempRequest.ApprovedSha is null ? "Inspect this review and checkout, then approve or review again" : "Approved; waiting to publish",
 				PullRequestStatus.CiFailure => "CI reruns are polled automatically; use review or connect for code repairs",
 				PullRequestStatus.ReadyToBeMerged => "Merge on GitHub when ready; CPR does not merge automatically",
@@ -173,22 +173,28 @@ namespace CPR.Controller
 		[HttpDelete( "{id:long}" )]
 		public Task<IActionResult> RemoveAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, true, false, null, tCancel );
+			return ReviewOrRemoveAsync( tId, true, false, false, null, tCancel );
 		}
 
 		[HttpPost( "{id:long}/purge" )]
 		public Task<IActionResult> PurgeAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, true, true, null, tCancel );
+			return ReviewOrRemoveAsync( tId, true, true, false, null, tCancel );
 		}
 
 		[HttpPost( "{id:long}/review" )]
 		public Task<IActionResult> ReviewAsync( [FromRoute( Name = "id" )] long tId, [FromBody( EmptyBodyBehavior = EmptyBodyBehavior.Allow )] ReviewRequest? tRequest, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, false, false, tRequest?.Resolution, tCancel );
+			return ReviewOrRemoveAsync( tId, false, false, false, tRequest?.Resolution, tCancel );
 		}
 
-		private async Task<IActionResult> ReviewOrRemoveAsync( long tId, bool tIsRemoved, bool tIsPurge, string? tResolution, CancellationToken tCancel )
+		[HttpPost( "{id:long}/retry" )]
+		public Task<IActionResult> RetryAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
+		{
+			return ReviewOrRemoveAsync( tId, false, false, true, null, tCancel );
+		}
+
+		private async Task<IActionResult> ReviewOrRemoveAsync( long tId, bool tIsRemoved, bool tIsPurge, bool tIsReportRetry, string? tResolution, CancellationToken tCancel )
 		{
 			PullRequest? tempRequest;
 			await tGate.Mutex.WaitAsync( tCancel );
@@ -200,6 +206,11 @@ namespace CPR.Controller
 				if ( tempRequest is null )
 				{
 					return NotFound();
+				}
+
+				if ( tIsReportRetry && ( tempRequest.Status != PullRequestStatus.Blocked || tempRequest.WorkspaceWorkerId is null ) )
+				{
+					return Conflict( new { Error = "Report retry requires a blocked review with a saved workspace" } );
 				}
 
 				if ( !tIsPurge && ( tempRequest.Status is PullRequestStatus.Merged or PullRequestStatus.Closed || tempRequest.CleanupRequestedAt is not null && tempRequest.CleanedAt is null ) )
@@ -237,6 +248,11 @@ namespace CPR.Controller
 				if ( tempRemote is not null && tempRemote.State != "OPEN" )
 				{
 					return Conflict( new { Error = "PR is no longer open; tracked PRs will be completed and cleaned automatically" } );
+				}
+
+				if ( tIsReportRetry && !WorkflowRules.IsSameSource( tempRequest, tempRemote! ) )
+				{
+					return Conflict( new { Error = "PR head or destination changed; report retry cannot renew review coverage" } );
 				}
 
 				if ( tempRequest.Worker is not null )
@@ -284,12 +300,12 @@ namespace CPR.Controller
 						tempCurrent.HeadRepository = tempRemote.HeadRepository;
 						tempCurrent.HeadBranch = tempRemote.HeadBranch;
 						tempCurrent.RemoteSha = tempRemote.HeadSha;
-						tempCurrent.WorkReason = PullRequestWorkReason.Rereview;
+						tempCurrent.WorkReason = tIsReportRetry ? PullRequestWorkReason.ReportRetry : PullRequestWorkReason.Rereview;
 						tempCurrent.Status = PullRequestStatus.WaitingToBeProcessed;
 						tempCurrent.CompletedAt = null;
 						tempCurrent.CleanupRequestedAt = null;
 						tempCurrent.CleanedAt = null;
-						tempCurrent.LastError = "Rereview requested; waiting for worker";
+						tempCurrent.LastError = tIsReportRetry ? "Report retry requested; saved review and checks will be reused" : "Rereview requested; waiting for worker";
 
 						if ( tResolution is not null )
 						{
@@ -302,7 +318,7 @@ namespace CPR.Controller
 					return Ok( new
 					{
 						Id = tId,
-						Message = tIsPurge ? "File deletion queued, including unpublished edits; database history retained" : tIsRemoved ? "Tracking stopped; saved work and database history retained. Use purge to delete the files" : "Rereview queued with the latest comments; fresh approval will be required"
+						Message = tIsPurge ? "File deletion queued, including unpublished edits; database history retained" : tIsRemoved ? "Tracking stopped; saved work and database history retained. Use purge to delete the files" : tIsReportRetry ? "Report retry queued; no code review or test rerun, fresh approval will be required" : "Rereview queued with the latest comments; fresh approval will be required"
 					} );
 				}
 				finally
@@ -727,6 +743,8 @@ namespace CPR.Controller
 		private object GetConnection( PullRequest tRequest, bool tIsCheckout = false )
 		{
 			ReviewStepSettings tempValidation = tSettings.Value.ReviewSteps.Last( x => x.IsEnabled );
+			ReviewStepSettings tempRepair = tSettings.Value.ReportRepairStep;
+			int tempRepairBudget = tempRepair.IsEnabled ? ( tempRepair.TimeoutSeconds + 15 ) * tempRepair.MaxAttempts : 0;
 			Worker? tempWorker = tRequest.Worker ?? ( tIsCheckout ? tRequest.WorkspaceWorker : null );
 
 			return new
@@ -739,7 +757,7 @@ namespace CPR.Controller
 				tRequest.SessionId,
 				tRequest.TargetBranch,
 				IsTweak = tRequest.WorkReason == PullRequestWorkReason.ManualTweak,
-				CompletionTimeoutSeconds = tRequest.WorkReason == PullRequestWorkReason.ManualTweak ? 600 : ( tempValidation.TimeoutSeconds + 15 ) * tempValidation.MaxAttempts + 1800,
+				CompletionTimeoutSeconds = tRequest.WorkReason == PullRequestWorkReason.ManualTweak ? 600 : ( tempValidation.TimeoutSeconds + 15 + tempRepairBudget ) * tempValidation.MaxAttempts + 1800,
 				SshHost = tempWorker?.SshHost,
 				ProjectDirectory = tempWorker is null ? null : $"/workspace/jobs/{tRequest.PullRequestId}/repo",
 				tRequest.LastError

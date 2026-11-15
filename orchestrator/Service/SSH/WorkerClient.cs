@@ -24,14 +24,21 @@ namespace CPR.Service.SSH
 
 		public async Task<WorkerSnapshot> ExecuteAsync( Worker tWorker, PullRequest tRequest, ReviewPlan tPlan, CancellationToken tCancel )
 		{
+			string tempFields = ReadResource( "commit-message.jq" ) + "\n" + ReadResource( "report-fields.jq" );
 			string tempReview = ReadResource( "run-review.sh" )
+				.Replace( "{{ReportRepair}}", ReadResource( "repair-report.sh" ), StringComparison.Ordinal )
+				.Replace( "{{ReportRetry}}", ReadResource( "retry-report.sh" ), StringComparison.Ordinal )
+				.Replace( "{{NormalizeCoverage}}", ReadResource( "normalize-coverage.jq" ), StringComparison.Ordinal )
+				.Replace( "{{ReportFieldsValidation}}", tempFields + "\nreport_fields", StringComparison.Ordinal )
+				.Replace( "{{ReportRepairSchema}}", ReadResource( "report-repair.schema.json" ), StringComparison.Ordinal )
 				.Replace( "{{ResultSchema}}", ReadResource( "result.schema.json" ), StringComparison.Ordinal )
-				.Replace( "{{ResultValidation}}", ReadResource( "commit-message.jq" ) + "\n" + ReadResource( "validate-result.jq" ), StringComparison.Ordinal )
+				.Replace( "{{ResultValidation}}", tempFields + "\n" + ReadResource( "validate-result.jq" ), StringComparison.Ordinal )
 				.Replace( "{{ResultReport}}", ReadResource( "report-result.jq" ), StringComparison.Ordinal )
 				.Replace( "{{ScopeValidation}}", ReadResource( "validate-scope.jq" ), StringComparison.Ordinal )
 				.Replace( "{{UsageReport}}", ReadResource( "record-usage.jq" ), StringComparison.Ordinal );
-			string tempCommands = $"is_review={( tPlan.IsValidationOnly ? 0 : 1 )}\n{PREPARE_COMMANDS}\n{tempReview}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}\nrm -f \"$JOB/tweak-base.json\"";
-			int tempTimeout = tPlan.Steps.Sum( x => ( x.TimeoutSeconds + 15 ) * x.MaxAttempts ) + 600;
+			string tempCommands = $"is_preserved={( tPlan.IsReportRetry ? 1 : 0 )}\nis_review={( tPlan.IsValidationOnly ? 0 : 1 )}\n{PREPARE_COMMANDS}\n{tempReview}\n{SNAPSHOT_COMMANDS}\n{PARK_COMMANDS}\nrm -f \"$JOB/tweak-base.json\"";
+			int tempRepairBudget = tPlan.ReportRepairStep is null ? 0 : ( tPlan.ReportRepairStep.TimeoutSeconds + 15 ) * tPlan.ReportRepairStep.MaxAttempts;
+			int tempTimeout = tPlan.IsReportRetry ? tempRepairBudget + 600 : tPlan.Steps.Sum( x => ( x.TimeoutSeconds + 15 + tempRepairBudget ) * x.MaxAttempts ) + 600;
 			string tempOutput = await RunAsync( tWorker, tRequest, "run", tempCommands, JsonSerializer.Serialize( tPlan ), tempTimeout, tCancel );
 
 			return ParseSnapshot( tempOutput );

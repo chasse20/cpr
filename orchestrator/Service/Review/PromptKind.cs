@@ -12,6 +12,8 @@ namespace CPR.Service.Review
 		FinalValidation,
 		Relevance,
 		Rereview,
-		TweakSummary
+		TweakSummary,
+		ReportRepair,
+		MergeRepair
 	}
 }

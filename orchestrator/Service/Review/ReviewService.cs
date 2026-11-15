@@ -101,8 +101,26 @@ namespace CPR.Service.Review
 
 		private async Task<WorkerSnapshot> ExecuteCoreAsync( Worker tWorker, PullRequest tRequest, bool tIsValidationOnly, string tOperationId, CancellationToken tCancel )
 		{
-			ReviewStepSettings[] tempSettings = [ .. tSettings.Value.ReviewSteps.Where( x => x.IsEnabled ) ];
+			bool tempIsReportRetry = tRequest.WorkReason == PullRequestWorkReason.ReportRetry;
+			ReviewStepSettings[] tempSettings = tempIsReportRetry ? [] : tIsValidationOnly ? [ tSettings.Value.ReviewSteps.Last( x => x.IsEnabled ) ] : [ .. tSettings.Value.ReviewSteps.Where( x => x.IsEnabled ) ];
 			Dictionary<PromptKind, string> tempPrompts = tSettings.Value.Prompts;
+			bool tempIsMergeRepair = !tIsValidationOnly && tRequest.WorkReason == PullRequestWorkReason.MergeConflict && tRequest.PublishedSha is not null;
+			ReviewReport? tempPriorReview = null;
+
+			if ( tempIsMergeRepair )
+			{
+				using IServiceScope tempScope = tScopes.CreateScope();
+				Context tempDatabase = tempScope.ServiceProvider.GetRequiredService<Context>();
+				tempPriorReview = await ReviewComment.GetFullReportAsync( tempDatabase, tRequest, tCancel );
+
+				if ( !tSettings.Value.MergeRepairStep.IsEnabled )
+				{
+					throw new InvalidOperationException( "Automatic merge repair is disabled; use cpr connect --tweak to resolve target integration" );
+				}
+
+				tempSettings = [ tSettings.Value.MergeRepairStep ];
+			}
+
 			PromptKind tempOperation = tRequest.WorkReason switch
 			{
 				PullRequestWorkReason.MergeConflict => PromptKind.MergeConflict,
@@ -112,19 +130,19 @@ namespace CPR.Service.Review
 			List<ReviewStep> tempSteps = [];
 			int tempCount = tempSettings.Length;
 
-			for ( int i = tIsValidationOnly ? tempCount - 1 : 0; i < tempCount; ++i )
+			for ( int i = 0; i < tempCount; ++i )
 			{
 				ReviewStepSettings tempStep = tempSettings[ i ];
-				IEnumerable<PromptKind> tempKinds = [ PromptKind.SharedReview, PromptKind.Relevance, tIsValidationOnly ? PromptKind.FinalValidation : tempOperation, .. tempStep.Prompts ];
+				IEnumerable<PromptKind> tempKinds = tempIsMergeRepair ? tempStep.Prompts : [ PromptKind.SharedReview, PromptKind.Relevance, tIsValidationOnly ? PromptKind.FinalValidation : tempOperation, .. tempStep.Prompts, PromptKind.Evidence ];
 
-				if ( i == tempCount - 1 )
+				if ( !tempIsMergeRepair && i == tempCount - 1 )
 				{
 					tempKinds = tempKinds.Concat( [ PromptKind.Correctness, PromptKind.Resources, PromptKind.Cleanup, PromptKind.FinalValidation ] );
 				}
 
 				List<string> tempBlocks = [];
 
-				foreach ( PromptKind tempKind in tempKinds.Append( PromptKind.Evidence ).Distinct() )
+				foreach ( PromptKind tempKind in tempKinds.Distinct() )
 				{
 					if ( !tempPrompts.TryGetValue( tempKind, out string? tempContent ) || string.IsNullOrWhiteSpace( tempContent ) )
 					{
@@ -144,8 +162,27 @@ namespace CPR.Service.Review
 				tempSteps.Add( new( tempStep.Name, tempStep.Model, tempStep.ReasoningEffort, tempStep.TimeoutSeconds, tempStep.MaxAttempts, tempPrompt ) );
 			}
 
-			JsonElement tempContext = await tGitHub.ReadReviewContextAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
-			ReviewPlan tempPlan = new( tRequest.RemoteSha, tIsValidationOnly, tRequest.WorkReason == PullRequestWorkReason.Rereview, tempContext, [ .. tempSteps ], tOperationId, tRequest.MaintainerResolution, tRequest.PublishedSha );
+			JsonElement tempContext;
+
+			if ( tempIsReportRetry )
+			{
+				GitHubPullRequest tempRemote = await tGitHub.ReadAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
+
+				if ( !WorkflowRules.IsSameSource( tRequest, tempRemote ) )
+				{
+					throw new InvalidOperationException( "PR head or destination changed; report retry cannot renew review coverage" );
+				}
+
+				tempContext = JsonSerializer.SerializeToElement( new { tempRemote.TargetSha, PullRequest = new { head = new { sha = tempRemote.HeadSha }, state = "open", @base = new { @ref = tempRemote.TargetBranch } } } );
+			}
+			else
+			{
+				tempContext = await tGitHub.ReadReviewContextAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
+			}
+
+			ReviewStepSettings tempRepairSettings = tSettings.Value.ReportRepairStep;
+			ReviewStep? tempReportRepair = tempRepairSettings.IsEnabled ? new( tempRepairSettings.Name, tempRepairSettings.Model, tempRepairSettings.ReasoningEffort, tempRepairSettings.TimeoutSeconds, tempRepairSettings.MaxAttempts, PromptRenderer.Render( tempPrompts[ PromptKind.ReportRepair ], tRequest ) ) : null;
+			ReviewPlan tempPlan = new( tRequest.RemoteSha, tIsValidationOnly || tempIsReportRetry, tRequest.WorkReason == PullRequestWorkReason.Rereview, tempContext, [ .. tempSteps ], tOperationId, tRequest.MaintainerResolution, tRequest.PublishedSha, tempIsReportRetry, tempReportRepair, tempIsMergeRepair, tempPriorReview );
 
 			return await tWorkers.ExecuteAsync( tWorker, tRequest, tempPlan, tCancel );
 		}
@@ -181,10 +218,23 @@ namespace CPR.Service.Review
 
 			foreach ( ReviewStepSettings tempStep in tempSteps )
 			{
-				if ( string.IsNullOrEmpty( tempStep.Name ) || !Regex.IsMatch( tempStep.Name, "^[a-z][a-z0-9-]{0,39}$" ) || string.IsNullOrEmpty( tempStep.Model ) || !Regex.IsMatch( tempStep.Model, "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" ) || tempStep.ReasoningEffort is not ( "low" or "medium" or "high" or "xhigh" or "max" or "ultra" ) || tempStep.TimeoutSeconds is < 60 or > 7200 || tempStep.MaxAttempts is < 1 or > 3 || tempStep.Prompts is null || tempStep.Prompts.Length == 0 || tempStep.Prompts.Any( x => x is not ( PromptKind.Correctness or PromptKind.Resources or PromptKind.Cleanup or PromptKind.FinalValidation or PromptKind.Relevance ) ) )
-				{
-					throw new InvalidOperationException( $"Invalid CPR review step '{tempStep.Name}': check its name, model, effort, timeout, attempts, and prompt kinds" );
-				}
+				ValidateStep( tempStep, [ PromptKind.Correctness, PromptKind.Resources, PromptKind.Cleanup, PromptKind.FinalValidation, PromptKind.Relevance ] );
+			}
+
+			ValidateStep( tSettings.ReportRepairStep, [ PromptKind.ReportRepair ] );
+			ValidateStep( tSettings.MergeRepairStep, [ PromptKind.MergeRepair, PromptKind.Correctness ] );
+
+			if ( !tSettings.MergeRepairStep.Prompts.Contains( PromptKind.MergeRepair ) )
+			{
+				throw new InvalidOperationException( "MergeRepairStep requires the scoped MergeRepair prompt" );
+			}
+		}
+
+		private static void ValidateStep( ReviewStepSettings? tStep, PromptKind[] tAllowedPrompts )
+		{
+			if ( tStep is null || string.IsNullOrEmpty( tStep.Name ) || !Regex.IsMatch( tStep.Name, "^[a-z][a-z0-9-]{0,39}$" ) || string.IsNullOrEmpty( tStep.Model ) || !Regex.IsMatch( tStep.Model, "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" ) || tStep.ReasoningEffort is not ( "low" or "medium" or "high" or "xhigh" or "max" or "ultra" ) || tStep.TimeoutSeconds is < 60 or > 7200 || tStep.MaxAttempts is < 1 or > 3 || tStep.Prompts is null || tStep.Prompts.Length == 0 || tStep.Prompts.Any( x => !tAllowedPrompts.Contains( x ) ) )
+			{
+				throw new InvalidOperationException( $"Invalid CPR review step '{tStep?.Name}': check its name, model, effort, timeout, attempts, and prompt kinds" );
 			}
 		}
 	}

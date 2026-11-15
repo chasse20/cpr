@@ -1,0 +1,18 @@
+{
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"pr_comment",
+		"commit_message"
+	],
+	"properties": {
+		"pr_comment": {
+			"type": "string",
+			"maxLength": 12000
+		},
+		"commit_message": {
+			"type": "string",
+			"maxLength": 4000
+		}
+	}
+}

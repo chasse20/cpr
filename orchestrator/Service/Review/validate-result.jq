@@ -13,7 +13,7 @@ require(type == "object"; "Result must be an object")
 | [
 	issue(.outcome == "complete"; "outcome must be complete after the assigned work is done"),
 	issue(.summary | text; "summary must explain the review result"),
-	issue(.pr_comment | type == "string" and length <= 12000 and (explode | all(.[]; . == 9 or . == 10 or (. >= 32 and (. < 127 or . > 159)))) and (contains("<!-- cpr-report:") | not); "pr_comment must be Markdown of at most 12000 characters, without control characters except LF/tab or CPR delivery markers"),
+	issue(.pr_comment | valid_comment; "pr_comment must be Markdown of at most 12000 characters, without control characters except LF/tab or CPR delivery markers"),
 	(if $is_final then issue(.pr_comment | text; "pr_comment is required for the final snapshot, including reviews with no code changes") else empty end),
 	issue(.scope_audit | type == "string"; "scope_audit must be a relative evidence path or an empty string"),
 	issue(.commit_message == "" or (.commit_message | valid_commit_message); "commit_message must have a descriptive subject beginning with Auto: and at most 72 characters including that prefix, a blank line before any body, at most 4000 characters total, and no control characters or generic CPR review subject"),

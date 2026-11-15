@@ -7,6 +7,7 @@ namespace CPR.SQL
 		CiRecovery,
 		Interactive,
 		Rereview,
-		ManualTweak
+		ManualTweak,
+		ReportRetry
 	}
 }
