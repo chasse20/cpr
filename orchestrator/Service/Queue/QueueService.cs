@@ -134,10 +134,11 @@ namespace CPR.Service.Queue
 				return;
 			}
 
-			// Recheck CI only for the commit CPR published
+			// Follow later commits after approval without changing the recorded publication
 			CIResult tempChecks = CIResult.Pending;
+			string? tempCIError = null;
 
-			if ( tempObserved is not null && tempObserved.Status is PullRequestStatus.WaitingForCi or PullRequestStatus.CiFailure or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged && WorkflowRules.IsSameSource( tempObserved, tempSnapshot ) && tempSnapshot.HeadSha == tempObserved.PublishedSha )
+			if ( tempObserved is not null && WorkflowRules.IsFollowingCI( tempObserved ) && WorkflowRules.IsSameBranch( tempObserved, tempSnapshot ) )
 			{
 				try
 				{
@@ -146,8 +147,7 @@ namespace CPR.Service.Queue
 				catch ( Exception tException ) when ( !tCancel.IsCancellationRequested )
 				{
 					tLogger.LogWarning( "CI unavailable for PR {Id}: {Reason}", tId, tException.Message );
-
-					return;
+					tempCIError = $"Unable to read CI; polling will retry: {tException.Message}";
 				}
 			}
 
@@ -167,6 +167,7 @@ namespace CPR.Service.Queue
 				{
 					tempRequest.Status = tempSnapshot.State == "MERGED" ? PullRequestStatus.Merged : PullRequestStatus.Closed;
 					tempRequest.CompletedAt = tempSnapshot.CompletedAt ?? DateTimeOffset.UtcNow;
+					tempRequest.RemoteSha = tempSnapshot.HeadSha;
 					tempRequest.CleanedAt = null;
 					tempRequest.CleanupRequestedAt = DateTimeOffset.UtcNow;
 					tempRequest.ReviewedTargetSha = null;
@@ -187,7 +188,7 @@ namespace CPR.Service.Queue
 				}
 
 				// Discard polls overtaken by queue actions or a publication in progress
-				if ( tempObserved is null || tempRequest.Status != tempObserved.Status || tempRequest.RemoteSha != tempObserved.RemoteSha || tempRequest.TargetBranch != tempObserved.TargetBranch || ( tempRequest.ApprovedSha is not null && tGate.Running.ContainsKey( tId ) ) )
+				if ( tempObserved is null || tempRequest.Status != tempObserved.Status || tempRequest.RemoteSha != tempObserved.RemoteSha || tempRequest.TargetBranch != tempObserved.TargetBranch || tempRequest.PublishedSha != tempObserved.PublishedSha || ( tempRequest.ApprovedSha is not null && tGate.Running.ContainsKey( tId ) ) )
 				{
 					return;
 				}
@@ -199,16 +200,21 @@ namespace CPR.Service.Queue
 					tempRequest.HeadBranch = tempSnapshot.HeadBranch;
 					tempRequest.HeadRepository = tempSnapshot.HeadRepository;
 				}
+				else if ( WorkflowRules.IsFollowingCI( tempRequest ) && WorkflowRules.IsSameBranch( tempRequest, tempSnapshot ) )
+				{
+					tempRequest.RemoteSha = tempSnapshot.HeadSha;
+				}
 				else if ( !WorkflowRules.IsSameSource( tempRequest, tempSnapshot ) || ( tempRequest.Status == PullRequestStatus.ReadyForApproval && tempRequest.ReviewedTargetSha != tempSnapshot.TargetSha ) )
 				{
 					WorkflowRules.Block( tempRequest, "PR head or target changed since review; use cpr connect --tweak for manual target integration, or cpr review to reassess" );
 				}
 
-				if ( tempRequest.Status is PullRequestStatus.WaitingForCi or PullRequestStatus.CiFailure or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged )
+				if ( WorkflowRules.IsFollowingCI( tempRequest ) )
 				{
-					if ( tempSnapshot.HeadSha != tempRequest.PublishedSha )
+					if ( tempCIError is not null )
 					{
-						WorkflowRules.Block( tempRequest, "Current PR head was not published by CPR; request a fresh review" );
+						tempRequest.Status = PullRequestStatus.WaitingForCi;
+						tempRequest.LastError = tempCIError[ ..Math.Min( 4000, tempCIError.Length ) ];
 					}
 					else
 					{

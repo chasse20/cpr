@@ -111,7 +111,9 @@ namespace CPR.Service.GitHub
 
 		public async Task<CIResult> ReadCIAsync( string tUrl, GitHubPullRequest tExpected, bool tIsCheckRequired, CancellationToken tCancel )
 		{
-			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "pr", "checks", tUrl, "--required", "--json", "name,bucket,state" ], tTimeoutSeconds: 45, tCancel: tCancel );
+			// Every reported check counts, including checks not required by branch protection
+			CommandResult tempResult = await tCommand.RunAsync( "gh", [ "pr", "checks", tUrl, "--json", "name,bucket,state" ], tTimeoutSeconds: 45, tCancel: tCancel );
+			string[] tempBuckets = ReadCheckBuckets( tempResult );
 			GitHubPullRequest tempCurrent = await ReadAsync( tUrl, tCancel );
 
 			if ( tempCurrent.State != "OPEN" || tempCurrent.HeadSha != tExpected.HeadSha || tempCurrent.TargetBranch != tExpected.TargetBranch || tempCurrent.TargetSha != tExpected.TargetSha || tempCurrent.HeadBranch != tExpected.HeadBranch || !string.Equals( tempCurrent.HeadRepository, tExpected.HeadRepository, StringComparison.OrdinalIgnoreCase ) )
@@ -119,37 +121,47 @@ namespace CPR.Service.GitHub
 				throw new InvalidOperationException( "PR changed while reading CI; check again before advancing" );
 			}
 
-			// GitHub returns JSON even when checks are pending or failed
-			if ( string.IsNullOrWhiteSpace( tempResult.Output ) )
-			{
-				if ( tempResult.IsSuccess )
-				{
-					return tIsCheckRequired ? CIResult.Pending : CIResult.Passed;
-				}
-
-				throw new InvalidOperationException( $"Unable to obtain required CI checks: {tempResult.Failure}" );
-			}
-
-			using JsonDocument tempDocument = JsonDocument.Parse( tempResult.Output );
-
-			if ( tempDocument.RootElement.ValueKind != JsonValueKind.Array )
-			{
-				throw new InvalidOperationException( "Invalid GitHub checks response" );
-			}
-
-			string[] tempBuckets = [ .. tempDocument.RootElement.EnumerateArray().Select( x => Get( x, "bucket" ).ToLowerInvariant() ) ];
-
 			if ( tempBuckets.Length == 0 )
 			{
 				return tIsCheckRequired ? CIResult.Pending : CIResult.Passed;
 			}
 
-			if ( tempBuckets.Any( x => x is "fail" or "cancel" ) )
+			if ( tempBuckets.Any( x => x == "fail" ) )
 			{
 				return CIResult.Failed;
 			}
 
-			return tempBuckets.All( x => x is "pass" or "skipping" ) ? CIResult.Passed : CIResult.Pending;
+			return tempBuckets.All( x => x is "pass" or "skipping" or "cancel" ) ? CIResult.Passed : CIResult.Pending;
+		}
+
+		private static string[] ReadCheckBuckets( CommandResult tResult )
+		{
+			if ( string.IsNullOrWhiteSpace( tResult.Output ) )
+			{
+				string tempError = tResult.Error.Trim();
+
+				if ( tResult.IsSuccess || ( tResult.ExitCode == 1 && tempError.StartsWith( "no checks reported on the '", StringComparison.Ordinal ) && tempError.EndsWith( "' branch", StringComparison.Ordinal ) ) )
+				{
+					return [];
+				}
+
+				throw new InvalidOperationException( $"Unable to obtain CI checks: {tResult.Failure}" );
+			}
+
+			// gh uses exit 1 for failed checks and exit 8 for pending checks
+			if ( tResult.ExitCode is not ( 0 or 1 or 8 ) )
+			{
+				throw new InvalidOperationException( $"Unable to obtain CI checks: {tResult.Failure}" );
+			}
+
+			using JsonDocument tempDocument = JsonDocument.Parse( tResult.Output );
+
+			if ( tempDocument.RootElement.ValueKind != JsonValueKind.Array || ( tempDocument.RootElement.GetArrayLength() == 0 && !tResult.IsSuccess ) )
+			{
+				throw new InvalidOperationException( "Invalid GitHub checks response" );
+			}
+
+			return [ .. tempDocument.RootElement.EnumerateArray().Select( x => Get( x, "bucket" ).ToLowerInvariant() ) ];
 		}
 
 		public async Task<long> PublishCommentAsync( string tRepository, int tNumber, string tBody, string tMarker, CancellationToken tCancel )

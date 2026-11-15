@@ -39,7 +39,7 @@ namespace CPR.Service.SSH
 
 		public async Task<string?> PrepareInteractiveAsync( Worker tWorker, PullRequest tRequest, CancellationToken tCancel )
 		{
-			string tempPreserve = tRequest.WorkReason == PullRequestWorkReason.ManualTweak && tRequest.PublishedSha != tRequest.RemoteSha ? "is_preserved=1\n" : "";
+			string tempPreserve = tRequest.WorkReason == PullRequestWorkReason.ManualTweak && tRequest.PublishedSha is null ? "is_preserved=1\n" : "";
 			string tempTweak = tRequest.WorkReason == PullRequestWorkReason.ManualTweak ? "\n" + ReadResource( "prepare-tweak.sh" ) : "";
 			string tempOutput = await RunAsync( tWorker, tRequest, "prepare", tempPreserve + PREPARE_COMMANDS + tempTweak + "\nif test -s \"$JOB/session-id\"; then printf 'CPR_SESSION|%s\\n' \"$(cat \"$JOB/session-id\")\"; fi", tCancel: tCancel );
 			string? tempSession = tempOutput.Split( '\n' ).LastOrDefault( x => x.StartsWith( "CPR_SESSION|", StringComparison.Ordinal ) )?[ "CPR_SESSION|".Length.. ].Trim();
