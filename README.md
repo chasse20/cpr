@@ -103,7 +103,11 @@ Use `cpr workers` to find a worker's ID, then `cpr pause 101` to stop new assign
 
 `PullRequest.WorkerId` records an active reservation; `WorkspaceWorkerId` records where unpublished work is saved. While awaiting your approval, `WorkerId` is null and the workspace remains intact, including its index, uncommitted merge, build outputs, and Codex session. Approval and interactive editing use the same workspace worker, waiting if it is busy or offline. `cpr checkout` copies the saved PR directory without reserving a worker. Workspaces are not transferred between workers.
 
-Run one orchestrator instance. Public GitHub PR checkouts are supported; private repository fetching and publication to contributor forks are not implemented.
+Run one orchestrator instance. Public GitHub PR checkouts are supported; private repository fetching is not implemented.
+
+Publication supports branches in the upstream repository and contributor forks. CPR pushes to the PR's source repository and branch, while review comments and CI tracking stay on the upstream PR. The configured GitHub account must have write access to the source repository, or write access to upstream with **Allow edits from maintainers** enabled on a personal fork. The token must also permit the push; GitHub still enforces token scope, branch protection, and workflow-file permissions.
+
+CPR checks access before recording approval and again before pushing. Missing access returns an actionable error and preserves the prepared work. A failed push clears approval so it can be retried with `cpr approve ID` after access is fixed. A changed PR source or target still requires fresh review or target integration. Publication retains the exact-tree, unchanged-head, and fast-forward checks; it does not force-push. Updating the orchestrator enables fork publication without a database migration or client update.
 
 ### HTTP API
 

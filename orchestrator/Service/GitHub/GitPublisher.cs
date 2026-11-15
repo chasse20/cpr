@@ -15,11 +15,6 @@ namespace CPR.Service.GitHub
 				throw new InvalidOperationException( "Missing explicit approval" );
 			}
 
-			if ( !string.Equals( tRequest.Repository, tRequest.HeadRepository, StringComparison.OrdinalIgnoreCase ) )
-			{
-				throw new InvalidOperationException( "Fork branch publication is not supported: not authorized to push to the contributor fork" );
-			}
-
 			if ( tRequest.WorkerId != tWorker.WorkerId )
 			{
 				throw new InvalidOperationException( "Worker assignment no longer matches" );
@@ -32,9 +27,15 @@ namespace CPR.Service.GitHub
 
 			GitHubPullRequest tempSnapshot = await tGitHub.ReadAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tCancel );
 
-			if ( tempSnapshot.IsCrossRepository || tempSnapshot.State != "OPEN" || tempSnapshot.HeadBranch != tRequest.HeadBranch || !string.Equals( tempSnapshot.HeadRepository, tRequest.HeadRepository, StringComparison.OrdinalIgnoreCase ) || tempSnapshot.TargetBranch != tRequest.TargetBranch || tRequest.ReviewedTargetSha is null || tempSnapshot.TargetSha != tRequest.ReviewedTargetSha )
+			if ( !WorkflowRules.IsSameBranch( tRequest, tempSnapshot ) || tRequest.ReviewedTargetSha is null || tempSnapshot.TargetSha != tRequest.ReviewedTargetSha )
 			{
 				throw new InvalidOperationException( "PR destination or branch changed since review; require new approval" );
+			}
+
+			// Never substitute the upstream repository for an unavailable fork
+			if ( string.IsNullOrWhiteSpace( tempSnapshot.HeadRepository ) )
+			{
+				throw new InvalidOperationException( "PR source repository is unavailable; it may have been deleted or access was revoked" );
 			}
 
 			string tempDirectory = Path.Combine( _settings.GitStoragePath, tRequest.PullRequestId.ToString() );
@@ -62,7 +63,7 @@ namespace CPR.Service.GitHub
 				throw new InvalidOperationException( "Published commit tree differs from approved tree" );
 			}
 
-			string tempRemoteUrl = $"https://github.com/{tRequest.Repository}.git";
+			string tempRemoteUrl = $"https://github.com/{tempSnapshot.HeadRepository}.git";
 			const string CREDENTIAL_HELPER = "credential.helper=!gh auth git-credential";
 			string tempRemote = await GitAsync( [ "-C", tempDirectory, "-c", CREDENTIAL_HELPER, "ls-remote", tempRemoteUrl, $"refs/heads/{tRequest.HeadBranch}" ], tCancel );
 			string tempRemoteHead = tempRemote.Split( '\t', StringSplitOptions.RemoveEmptyEntries ).FirstOrDefault() ?? "";
@@ -94,6 +95,8 @@ namespace CPR.Service.GitHub
 				throw new InvalidOperationException( "PR head or target changed before publication; request a fresh review" );
 			}
 
+			// Fork edit permission may be revoked after approval
+			await tGitHub.VerifyPublicationAccessAsync( tempSnapshot, tCancel );
 			await tGate.Mutex.WaitAsync( tCancel );
 
 			try
@@ -127,7 +130,9 @@ namespace CPR.Service.GitHub
 
 			if ( !tempAfter.StartsWith( tNewCommit + "\t", StringComparison.Ordinal ) )
 			{
-				throw new InvalidOperationException( "Push result not confirmed; inspect remote before retry", tempPushError );
+				string tempFailure = tempPushError is null ? "" : $" {tempPushError.Message}";
+
+				throw new InvalidOperationException( $"Push result not confirmed for {tRequest.HeadRepository}:{tRequest.HeadBranch}; inspect remote before retry.{tempFailure}", tempPushError );
 			}
 		}
 

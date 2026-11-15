@@ -668,11 +668,6 @@ namespace CPR.Controller
 					return Conflict( new { Error = "PR must be ReadyForApproval with an unapproved, current snapshot" } );
 				}
 
-				if ( !string.Equals( tempRequest.HeadRepository, tempRequest.Repository, StringComparison.OrdinalIgnoreCase ) )
-				{
-					return Conflict( new { Error = "Fork PR publication is not configured" } );
-				}
-
 				if ( !tGate.Running.TryAdd( tId, Task.CompletedTask ) )
 				{
 					return Conflict( new { Error = "Worker operation is still running" } );
@@ -686,6 +681,7 @@ namespace CPR.Controller
 			try
 			{
 				GitHubPullRequest tempRemote = await tGitHub.ReadAsync( $"https://github.com/{tempRequest.Repository}/pull/{tempRequest.Number}", tCancel );
+				await tGitHub.VerifyPublicationAccessAsync( tempRemote, tCancel );
 				await tGate.Mutex.WaitAsync( tCancel );
 
 				try
