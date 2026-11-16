@@ -1,0 +1,5 @@
+<Solution>
+	<Project Path="src/Orchestrator/CPR.csproj" />
+	<Project Path="src/Worker/CPR.Worker.csproj" />
+	<Project Path="src/Protocol/CPR.Protocol.csproj" />
+</Solution>

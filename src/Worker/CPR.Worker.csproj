@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<AssemblyName>CPR.Worker</AssemblyName>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="../Protocol/CPR.Protocol.csproj" />
+		<Using Include="CPR.Protocol" />
+		<Using Include="System.Diagnostics" />
+		<Using Include="System.Globalization" />
+		<Using Include="System.Text" />
+		<Using Include="System.Text.Json" />
+		<Using Include="System.Text.Json.Nodes" />
+		<Using Include="System.Text.RegularExpressions" />
+		<EmbeddedResource Include="Schemas/*.json" LogicalName="CPR.Worker.%(Filename)%(Extension)" />
+	</ItemGroup>
+</Project>

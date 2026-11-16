@@ -10,7 +10,7 @@ usage() {
 Usage: cpr COMMAND
 
   help              List commands
-  status            List pull requests and file cleanup status
+  status            List active PRs and unfinished file cleanup
   show ID [--comment]
                     Show review history, or preview the prepared PR comment
   workers           List workers and their assignments
@@ -24,9 +24,8 @@ Usage: cpr COMMAND
                     Rereview, optionally recording a maintainer decision
   retry ID          Repair a saved final report without rerunning review or tests
   checkout ID       Copy the saved PR checkout locally
-  connect ID [--tweak]
-                    Open Codex; --tweak skips automated review on exit
-  approve ID        Approve the prepared changes for publication
+  connect ID        Open a manual session; summarize and save on exit
+  approve ID        Integrate the latest target if needed, then publish
 
 ID is the CPR ID shown by status. WORKER_ID is shown by workers.
 Configuration: ~/.config/cpr/config
@@ -50,10 +49,7 @@ case "$command_name" in
   show)
     (($# == 1 || $# == 2)) || fail 'Usage: cpr show ID [--comment]'
     if (($# == 2)); then [[ $2 == --comment ]] || fail 'Usage: cpr show ID [--comment]'; fi ;;
-  connect)
-    (($# == 1 || $# == 2)) || fail 'Usage: cpr connect ID [--tweak]'
-    if (($# == 2)); then [[ $2 == --tweak ]] || fail 'Usage: cpr connect ID [--tweak]'; fi ;;
-  checkout|approve|remove|cancel|purge|retry)
+  connect|checkout|approve|remove|cancel|purge|retry)
     (($# == 1)) || fail "Usage: cpr $command_name ID" ;;
   pause|resume)
     (($# == 1)) || fail "Usage: cpr $command_name WORKER_ID" ;;
@@ -113,7 +109,7 @@ print_table() {
     [range($columns) as $i | [.[][$i] | tostring | length] | max] as $widths |
     .[] | [range($columns) as $i | .[$i] | tostring | pad($widths[$i])] | join("  ")'
 }
-valid_id() { [[ $1 =~ ^[1-9][0-9]*$ ]] || fail 'ID must be a positive CPR ID from cpr status'; }
+valid_id() { [[ $1 =~ ^[1-9][0-9]*$ ]] || fail 'ID must be a positive CPR ID'; }
 worker_host() {
   local host
   host=$(jq -r '.sshHost // empty' <<< "$1")
@@ -124,7 +120,6 @@ worker_host() {
 
 case "$command_name" in
   status|workers)
-    (($# == 0)) || fail "Usage: cpr $command_name"
     endpoint=/api/status
     [[ $command_name != workers ]] || endpoint=/api/worker
     result=$(request GET "$endpoint")
@@ -143,7 +138,6 @@ case "$command_name" in
     result=$(request PUT "/api/worker/$1/status" "$payload")
     jq -r '"Worker \(.id): \(.status)"' <<< "$result" ;;
   add)
-    (($# == 1)) || fail 'Usage: cpr add URL (one PR at a time)'
     url=$1
     [[ $url =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*/?$ ]] || fail "Invalid GitHub PR URL: $url"
     need jq
@@ -167,6 +161,7 @@ case "$command_name" in
       "Target: \(.targetBranch)  Head: \(.remoteSha)",
       (if .preparedSha != null then "Prepared tree: \(.preparedSha)  Reviewed target: \(.reviewedTargetSha)" else empty end),
       "Next: \(.nextAction)",
+      (if .recovery.category != null then "Recovery: \(.recovery.category); \(.recovery.attempts) automatic retries used\(if .recovery.nextAttemptAt != null then "; next check " + .recovery.nextAttemptAt else "" end)" else empty end),
       (if .prComment != null then "PR comment preview: cpr show \(.id) --comment" else empty end),
       (if .lastError != null then "Reason: \(.lastError)" else empty end),
       (if .codeRabbit != null then
@@ -219,77 +214,45 @@ case "$command_name" in
     result=$(request POST "/api/pr/$1/review" "$payload")
     jq -r '.message' <<< "$result" ;;
   approve|remove|cancel|purge|retry)
-    (($# == 1)) || fail "Usage: cpr $command_name ID"
     valid_id "$1"
     if [[ $command_name == remove ]]; then
       result=$(request DELETE "/api/pr/$1")
     else
       result=$(request POST "/api/pr/$1/$command_name")
     fi
-    jq -r '.message, (if .sshHost != null then "Saved work: \(.sshHost):\(.projectDirectory)\nReview history: \(.sshHost):\(.stateDirectory)" else empty end)' <<< "$result" ;;
+    jq -r '.message' <<< "$result" ;;
   connect)
-    is_tweak=false
-    [[ ${2:-} != --tweak ]] || is_tweak=true
     id=$1; valid_id "$id"; need ssh
-    endpoint="/api/pr/$id/connect"
-    if [[ $is_tweak == true ]]; then
-      current=$(request GET "/api/pr/$id")
-      jq -e '.supportsTweak == true' <<< "$current" >/dev/null || fail 'Server does not support connect --tweak; update the CPR orchestrator first.'
-      endpoint+='?tweak=true'
-    fi
-    if [[ $is_tweak == true ]]; then
-      printf 'Preparing manual session; recovering any saved final report without repeating review...\n'
-      result=$(request POST "$endpoint" '' 600)
-    else
-      result=$(request POST "$endpoint")
-    fi
-    if [[ $is_tweak == true ]]; then
-      jq -e '.isTweak == true' <<< "$result" >/dev/null || fail 'Server did not prepare a tweak session.'
-    elif [[ $(jq -r '.isTweak // false' <<< "$result") == true ]]; then
-      fail "A tweak session is queued; use cpr connect $id --tweak once its worker is ready."
-    fi
+    printf 'Preparing the saved workspace for manual recovery...\n'
+    result=$(request POST "/api/pr/$id/connect" '' 600)
+    jq -e '.isTweak == true' <<< "$result" >/dev/null || fail 'Update the CPR orchestrator: connect requires manual completion.'
     if [[ -z $(jq -r '.sshHost // empty' <<< "$result") ]]; then
-      retry_command="cpr connect $id"
-      [[ $is_tweak != true ]] || retry_command+=' --tweak'
-      printf 'PR %s: no worker assigned yet. Run %s once a worker is ready.\n' "$id" "$retry_command"
+      printf 'PR %s: no worker assigned yet. Run cpr connect %s once a worker is ready.\n' "$id" "$id"
       exit 0
     fi
     host=$(worker_host "$result")
-    completion_timeout=$(jq -r '.completionTimeoutSeconds // 120' <<< "$result")
-    [[ $completion_timeout =~ ^[1-9][0-9]{0,4}$ ]] && ((completion_timeout <= 86400)) || fail 'Invalid completion timeout from CPR'
     session=$(jq -r '.sessionId // empty' <<< "$result")
     [[ $session =~ ^[A-Za-z0-9_-]{6,128}$ ]] || session=''
-    codex_args=(codex --sandbox workspace-write --add-dir /state/cargo -c sandbox_workspace_write.network_access=true)
-    if [[ $is_tweak == true ]]; then
-      # Manual Git integration needs writable Git metadata in the worker container
-      codex_args=(codex --sandbox danger-full-access)
-      printf 'Opening Codex tweak session for PR %s on %s. Exit summarizes this session and saves a local snapshot; publication requires approval.\n' "$id" "$host"
-    else
-      printf 'Opening Codex for PR %s on %s...\n' "$id" "$host"
-    fi
+    target=$(jq -r '.targetBranch' <<< "$result")
+    codex_args=(codex --sandbox danger-full-access)
     [[ -z $session ]] || codex_args+=(resume "$session")
-    if [[ $is_tweak == true ]]; then
-      target=$(jq -r '.targetBranch' <<< "$result")
-      codex_args+=("This is a maintainer-requested manual CPR tweak session for CPR $id, target branch $target. Wait for my instructions and change only what I request. Preserve all saved review repairs and maintainer decisions. Local Git staging and commits are authorized to finish a previous pending merge and integrate the latest target; do not rewrite the saved history. Resolve and stage conflicts and run only checks relevant to the integration. Do not repeat the full CPR review, scope audit, optimization or memory passes. Do not push, publish, or merge the GitHub PR. Record any checks you actually run and their results in /state/cpr/jobs/$id/tweak-checks.md; do not claim earlier checks ran in this session. On successful exit CPR briefly summarizes only this session and checks the local snapshot without another full review; publication still requires a separate cpr approve $id.")
-    fi
+    codex_args+=("This is a maintainer-requested manual CPR session for CPR $id, target branch $target. Wait for my instructions and change only what I request. Before editing, read applicable repository AGENTS.md, CODE_GUIDE.md, CODE_STYLE.md, and linked style requirements; apply the current target's rules within the requested scope. Preserve all saved review repairs and maintainer decisions. Local Git staging and commits are authorized to finish a pending merge and integrate the latest target; do not rewrite saved history. Run only relevant checks. Do not repeat the full CPR review or push, publish, or merge the GitHub PR. Record checks actually run and their results in /state/cpr/jobs/$id/tweak-checks.md. On successful exit CPR summarizes only this session and saves its snapshot; publication requires cpr approve $id.")
+    printf 'Opening manual Codex session for PR %s on %s...\n' "$id" "$host"
     printf -v codex_command '%q ' "${codex_args[@]}"
     remote_script="test \"\$(cat /state/cpr/active-id)\" = \"$id\" && test ! -f /state/cpr/released-$id && cd /workspace/repo && exec $codex_command"
     printf -v remote_command 'flock -n --close /state/cpr/worker.lock bash -c %q' "$remote_script"
     if ! ssh -t -o StrictHostKeyChecking=yes "$host" "$remote_command"; then
       fail 'Codex session did not exit successfully; edits remain on the worker.'
     fi
-    if [[ $is_tweak == true ]]; then
-      printf 'Summarizing this tweak session and saving the snapshot; skipping automated review...\n'
-    else
-      printf 'Validating edits and retaining review evidence...\n'
-    fi
-    endpoint="/api/pr/$id/complete"
-    [[ $is_tweak != true ]] || endpoint+='?tweak=true'
-    result=$(request POST "$endpoint" '' "$completion_timeout")
+    printf 'Summarizing this session and saving the snapshot...\n'
+    result=$(request POST "/api/pr/$id/complete" '' 600)
     jq -r '"PR \(.id): \(.status); snapshot \(.preparedSha)"' <<< "$result"
-    if [[ $is_tweak == true ]]; then printf 'Saved locally. Inspect with cpr show %s; publish only with cpr approve %s.\n' "$id" "$id"; fi ;;
+    if [[ $(jq -r '.status' <<< "$result") == ReadyForApproval ]]; then
+      printf 'Saved locally. Inspect with cpr show %s; publish with cpr approve %s.\n' "$id" "$id"
+    else
+      printf 'Saved locally. CPR will resume the missing initial review work and affected validation. Follow with cpr show %s.\n' "$id"
+    fi ;;
   checkout)
-    (($# == 1)) || fail 'Usage: cpr checkout ID'
     valid_id "$1"; need ssh; need rsync
     result=$(request GET "/api/pr/$1/connection")
     host=$(worker_host "$result")

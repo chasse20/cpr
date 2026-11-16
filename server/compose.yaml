@@ -10,6 +10,8 @@ x-settings:
   git-name: &git-name 'Your Name'
   git-email: &git-email 'your-github-verified-email@example.com'
   desktop-public-key: &desktop-key 'ssh-ed25519 REPLACE_WITH_YOUR_DESKTOP_PUBLIC_KEY'
+  # Optional toolchain for reviewing Rust repositories; CPR itself is C#.
+  rust-toolchain: &rust-toolchain 'false'
   # Set both to true after signing in to Codex on the workers.
   run-workers: &run-workers 'false'
   publish-approved: &publish-approved 'false'
@@ -18,7 +20,11 @@ x-settings:
   discord-webhook-url: &discord-webhook-url ''
 
 x-worker: &worker
-  build: .
+  build: &worker-build
+    context: ../src/Worker
+    args:
+      CPR_IMAGE: *orchestrator-image
+      INSTALL_RUST: *rust-toolchain
   image: cpr-worker:local
   depends_on:
     initialize:
@@ -50,7 +56,7 @@ x-worker: &worker
 
 services:
   initialize:
-    build: .
+    build: *worker-build
     image: cpr-worker:local
     restart: 'no'
     network_mode: none
@@ -131,6 +137,7 @@ services:
 
   cpr-orchestrator:
     image: *orchestrator-image
+    stop_grace_period: 130s
     depends_on:
       initialize:
         condition: service_completed_successfully

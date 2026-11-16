@@ -1,0 +1,14 @@
+.git
+**/bin/
+**/obj/
+**/.env
+**/.env.*
+**/appsettings.Private.json
+**/compose.private.yaml
+**/*.key
+**/*.pem
+**/*.user
+server/data/
+src/Orchestrator/data/
+tests/
+Tests/

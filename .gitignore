@@ -7,7 +7,8 @@
 **/__pycache__/
 **/*.pyc
 server/data/
-orchestrator/data/
+src/Orchestrator/data/
 appsettings.Private.json
 *.csproj.user
 compose.private.yaml
+/[Tt]ests/
