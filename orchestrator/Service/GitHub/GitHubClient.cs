@@ -135,10 +135,12 @@ namespace CPR.Service.GitHub
 							string tempBody = Get( tempItem, "body" );
 							string tempFile = Get( tempItem, "path" );
 							string tempCommit = Get( tempItem, "commit_id" );
+
 							// GitHub remaps inline commit IDs after a push without changing the finding
 							int tempInfo = tempKind == "review" ? tempBody.IndexOf( "<h6>", StringComparison.Ordinal ) : -1;
 							string tempFinding = tempInfo < 0 ? tempBody : tempBody[ ..tempInfo ].TrimEnd();
 							string tempVersion = Convert.ToHexStringLower( System.Security.Cryptography.SHA256.HashData( Encoding.UTF8.GetBytes( JsonSerializer.Serialize( new[] { tempFinding, tempFile } ) ) ) );
+
 							tempComments.Add( new( $"{tempKind}:{tempItem.GetProperty( "id" ).GetInt64()}", tempVersion, Get( tempItem, "html_url" ), tempBody, tempFile, tempCommit ) );
 						}
 					}

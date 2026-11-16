@@ -4,7 +4,8 @@ Applies to CPR. Follow [.editorconfig](.editorconfig) and the conventions below.
 
 ## Scope and maintenance
 
-- Explicit user instructions and the latest corrections take precedence. Update the relevant rule here and apply it to affected code in the same pass.
+- Explicit user instructions and the latest corrections take precedence. Update the relevant rule here and apply it to affected code in the same pass. Push only when explicitly instructed for the current changes; an earlier push request does not authorize later pushes.
+- Use descriptive commit subjects without an `Auto:` prefix for changes to this CPR repository.
 - Keep this guide concise: merge overlapping rules, replace stale guidance, and link to existing workflow documentation instead of repeating it.
 - Match surrounding conventions where unspecified. Keep changes focused; avoid unrelated rewrites, single-use indirection, and duplicated validation rules. Do not generalize isolated patterns without direction.
 - Do not add test projects, test files, or temporary verification artifacts unless requested.
@@ -34,7 +35,7 @@ Applies to CPR. Follow [.editorconfig](.editorconfig) and the conventions below.
 - Put braces on their own lines and around control-flow bodies. Methods and constructors use block bodies; simple properties and indexers may use expressions.
 - Space nonempty parentheses and brackets: `Add( tValue )`, `tValues[ i ]`, `new double[ tLength ]`. Keep empty delimiters, casts, and attribute brackets compact: `new()`, `[]`, `(double)tValue`, `[Route( "csv" )]`.
 - Keep complete `if` conditions on one line. Follow surrounding wrapping elsewhere.
-- Use short stage/calculation comments without ending punctuation. Routine XML documentation is unnecessary.
+- Use short stage/calculation comments without ending punctuation. Separate standalone comments from preceding code with a blank line; keep each comment attached to the code it describes. Routine XML documentation is unnecessary.
 - Do not use `continue`. Prefer guarded blocks or `else`; combine nested conditions when neither has an `else`.
 - Prefer straightforward guards over short early exits, without excessive nesting, artificial flags, or `goto`. Preserve cancellation, side effects, and disposal timing.
 - Separate logical stages, declaration groups, assignments/calls, calculations/output writes, and control-flow blocks with blank lines. Keep related declarations together.
