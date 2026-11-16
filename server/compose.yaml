@@ -1,17 +1,16 @@
-# Edit x-settings, then run: docker compose pull cpr-orchestrator && docker compose up -d --build
+# Edit x-settings, then run: docker compose pull && docker compose up -d
 # Requires Docker Compose 2.23.1+. GPU-enabled workers also need NVIDIA Container Toolkit.
 # Keep your configured copy private. Write a literal $ as $$ in values below.
 name: cpr
 
 x-settings:
-  orchestrator-image: &orchestrator-image cpr:latest
+  orchestrator-image: &orchestrator-image 10.0.20.10:5000/cpr:latest
+  worker-image: &worker-image 10.0.20.10:5000/cpr-worker:latest
   database: &database 'Host=YOUR_POSTGRES_HOST;Port=5432;Database=db;Username=cpr_app;Password=REPLACE_ME;SSL Mode=VerifyFull'
   github-token: &github-token 'REPLACE_WITH_SCOPED_GITHUB_TOKEN'
   git-name: &git-name 'Your Name'
   git-email: &git-email 'your-github-verified-email@example.com'
   desktop-public-key: &desktop-key 'ssh-ed25519 REPLACE_WITH_YOUR_DESKTOP_PUBLIC_KEY'
-  # Optional toolchain for reviewing Rust repositories; CPR itself is C#.
-  rust-toolchain: &rust-toolchain 'false'
   # Set both to true after signing in to Codex on the workers.
   run-workers: &run-workers 'false'
   publish-approved: &publish-approved 'false'
@@ -20,12 +19,7 @@ x-settings:
   discord-webhook-url: &discord-webhook-url ''
 
 x-worker: &worker
-  build: &worker-build
-    context: ../src/Worker
-    args:
-      CPR_IMAGE: *orchestrator-image
-      INSTALL_RUST: *rust-toolchain
-  image: cpr-worker:local
+  image: *worker-image
   depends_on:
     initialize:
       condition: service_completed_successfully
@@ -56,8 +50,7 @@ x-worker: &worker
 
 services:
   initialize:
-    build: *worker-build
-    image: cpr-worker:local
+    image: *worker-image
     restart: 'no'
     network_mode: none
     volumes:

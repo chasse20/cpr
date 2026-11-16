@@ -13,6 +13,7 @@ src/
     Service/         Services grouped by responsibility
     SQL/             Database entities and Create.sql
     Dockerfile
+    PushToDocker.sh
   Worker/            Executable invoked over SSH
     Execution/       Commands, Codex processes, cancellation, and locks
     Git/             Local workspaces, integration, and snapshots
@@ -23,6 +24,7 @@ src/
     Sessions/        Manual sessions and their summaries
     Schemas/         Model-output JSON schemas
     Dockerfile
+    PushToDocker.sh
   Protocol/          Shared SSH request and response contracts
 client/              Desktop CLI and config template
 server/              Compose, SSH config, and worker instructions
@@ -40,7 +42,7 @@ CPR.slnx             .NET solution
 | `client/` | Your computer | Bash CLI, API requests, interactive SSH and checkout transfer |
 | `server/` | Server deployment | Compose, SSH configuration and global worker instructions |
 
-The orchestrator calls `cpr-worker OPERATION` over SSH and sends JSON on stdin. The worker executable exits when the operation finishes; it does not host another API. Database credentials and the GitHub publication token stay in the orchestrator. Workers retain their Codex sign-in and local files. Each application's Dockerfile lives beside its project; one worker image serves every worker. Rust is optional tooling for reviewed repositories, not CPR implementation code.
+The orchestrator calls `cpr-worker OPERATION` over SSH and sends JSON on stdin. The worker executable exits when the operation finishes; it does not host another API. Database credentials and the GitHub publication token stay in the orchestrator. Workers retain their Codex sign-in and local files. Each application's Dockerfile and `PushToDocker.sh` live beside its project. The scripts build and push independent images locally; the server pulls them through Compose. One worker image serves every worker. The worker image includes Rust tooling for reviewed repositories; CPR itself is C#.
 
 ## Daily workflow
 

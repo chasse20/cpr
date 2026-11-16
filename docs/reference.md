@@ -105,7 +105,7 @@ Use `cpr workers` to find a worker's ID, then `cpr pause 101` to stop new assign
 
 `src/Orchestrator/` contains the ASP.NET Core service. It owns PostgreSQL, scheduling, approval decisions, GitHub/CodeRabbit/CI polling, publication and notifications. Workers return local execution results; the orchestrator decides the PR state and whether publication is authorized. `Program.cs` hosts ASP.NET Core, `Controller/` exposes the HTTP API, and `Service/` groups queue processing, GitHub operations, SSH, and command execution.
 
-`SQL/` contains the EF Core context, entities, and persistence enums. [Create.sql](../src/Orchestrator/SQL/Create.sql) creates the `cpr` schema in your existing PostgreSQL database, its three tables (`Worker`, `PullRequest`, `ReviewRun`), indexes, and nine example workers. It also creates the `cpr_app` login and grants runtime access to those tables. `PullRequest.CompletedAt` records GitHub's merge or closure time (falling back to the time CPR observes it); `CleanedAt` records successful file cleanup. The application does not run migrations or create schema. After updating for maintainer resolutions, rerun `Create.sql` to add the nullable `PullRequest.MaintainerResolution` column before deploying the new orchestrator and client. Only the orchestrator receives the database connection. Review prompts live in application configuration.
+`SQL/` contains the EF Core context, entities, and persistence enums. [Create.sql](../src/Orchestrator/SQL/Create.sql) creates the `cpr` schema in your existing PostgreSQL database, its three tables (`Worker`, `PullRequest`, `ReviewRun`), indexes, and workers 101–115. It also creates the `cpr_app` login and grants runtime access to those tables. `PullRequest.CompletedAt` records GitHub's merge or closure time (falling back to the time CPR observes it); `CleanedAt` records successful file cleanup. The application does not run migrations or create schema. After updating for maintainer resolutions, rerun `Create.sql` to add the nullable `PullRequest.MaintainerResolution` column before deploying the new orchestrator and client. Only the orchestrator receives the database connection. Review prompts live in application configuration.
 
 `GitStoragePath` is the orchestrator's staging directory for bare Git repositories. It fetches approved worker commits there, checks their contents, and pushes them to GitHub. The container uses `/data/git`; each PR's checkout lives at `/workspace/jobs/ID/repo` on its workspace worker. `/workspace/repo` points to the currently selected checkout.
 
@@ -187,11 +187,15 @@ Full review files live under `/state/cpr/jobs/ID/runs/RUN/` on the worker until 
 
 `src/Worker/` contains the C# command-line executable, typed report validation, model-output schemas and [worker Dockerfile](../src/Worker/Dockerfile). It owns local checkout preparation, Git integration and snapshots, Codex process lifecycle and cancellation, evidence validation, report recovery, stage checkpoints, manual session summaries, history capture and file cleanup. It receives a review plan and captured context over SSH, runs one operation, returns structured output and exits. It has no HTTP listener or database connection and does not poll GitHub or publish changes. `src/Protocol/` holds the request/response records shared with the orchestrator. Review prompts, model settings, retry policy and job scheduling are supplied by the orchestrator; worker-local bounded attempts follow that assigned plan.
 
-`server/` contains Compose, `sshd_config`, and `worker-instructions.md`. The [orchestrator Dockerfile](../src/Orchestrator/Dockerfile) builds both C# applications from the repository root and includes the published worker executable as a deployment artifact. The worker Dockerfile copies that executable and the matching .NET runtime from the configured orchestrator image. Compose builds one worker image on the server and uses it for every worker. Only SSH runs continuously in worker containers; the C# executable starts on demand. There is no shell-script fallback for older workers: deploy matching images together.
+`server/` contains Compose, `sshd_config`, and `worker-instructions.md`. Each application has its own Dockerfile and `PushToDocker.sh`, using the repository root as build context. The [orchestrator Dockerfile](../src/Orchestrator/Dockerfile) publishes only the HTTP service; the [worker Dockerfile](../src/Worker/Dockerfile) publishes the worker executable and includes the official .NET runtime, Codex, SSH and repository build tools. Neither image depends on the other. Compose pulls both published images and uses the same worker image for initialization and every worker. Only SSH runs continuously in worker containers; the C# executable starts on demand. Deploy images from the same revision together so their shared protocol agrees.
 
-Rust is optional tooling for reviewing Rust repositories. Set `x-settings.rust-toolchain` to `'true'` before building workers to include stable Rust, rustfmt, Clippy, rustdoc and the `wasm32-unknown-unknown` target. The default is `'false'`; CPR itself requires no Rust toolchain. The worker needs Bash for interactive sessions and container setup, but its review logic and JSON validation are C#. jq remains a dependency of the desktop Bash client only.
+The worker image always includes stable Rust, rustfmt, Clippy, rustdoc and the `wasm32-unknown-unknown` target for reviewing Rust repositories. The standard `./src/Worker/PushToDocker.sh` command includes this tooling automatically. The worker needs Bash for interactive sessions and container setup, but its review logic and JSON validation are C#. jq remains a dependency of the desktop Bash client only.
 
 The example has nine workers: 101–103 use GPU `0`, 104–106 use GPU `1`, and 107–109 use GPU `2`. Each worker defines its own `device_ids`; GPU indices and UUIDs are supported. Change these assignments to match the machine, or remove a worker's `deploy` block to run it without a GPU.
+
+Athena's private Compose configuration uses fifteen workers: 101–105 on GPU `0`, 106–110 on GPU `1`, and 111–115 on GPU `2`. Each worker has a disjoint set of 16 logical CPU threads, keeping the two SMT threads of each of its eight physical cores together. Workers use CPUs `0–119,128–247`; the orchestrator uses the remaining `120–127,248–255`. The private initializer creates SSH identities and state for all fifteen workers. These CPU numbers are specific to Athena's topology.
+
+Re-run [Create.sql](../src/Orchestrator/SQL/Create.sql) as the database administrator before enabling the expanded deployment; it registers any missing workers in the 101–115 range. Existing registrations and statuses are preserved. Sign in to Codex on each newly deployed worker and refresh the desktop SSH host keys. Other worker-count changes must likewise update Compose services, the initializer's worker-ID range, database registrations and desktop SSH aliases.
 
 Compose creates the SSH identities, worker Git configuration, and persistent directories under `data/`. Checkouts, Codex state, and SSH identities survive container restarts. Back up `data/` and the PostgreSQL database when moving the deployment.
 
@@ -231,11 +235,14 @@ Use the CPR ID from `status` for commands that take `ID`. Worker commands use th
 
 The server needs Docker with Compose 2.23.1 or later. GPU workers also need NVIDIA Container Toolkit. The orchestrator uses an existing PostgreSQL database; the server host does not need .NET installed.
 
-From the local checkout, set `tempRegistry` in [PushToDocker.sh](../src/Orchestrator/PushToDocker.sh), then build and push the orchestrator image:
+From the local checkout, build and push both images with the [orchestrator script](../src/Orchestrator/PushToDocker.sh) and [worker script](../src/Worker/PushToDocker.sh):
 
 ```sh
 ./src/Orchestrator/PushToDocker.sh
+./src/Worker/PushToDocker.sh
 ```
+
+Both scripts and the Compose template use registry `10.0.20.10:5000`. If it changes, update `tempRegistry` in both scripts and both image references in Compose.
 
 Run [Create.sql](../src/Orchestrator/SQL/Create.sql) in the destination database as its administrator before starting the orchestrator. The administrator must be able to create roles and own the CPR schema and tables. From the repository root, replace the host, database, and administrator username (`postgres` below):
 
@@ -259,33 +266,40 @@ psql -X -h YOUR_POSTGRES_HOST -p 5432 -U cpr_app -d YOUR_DATABASE \
 
 For remote TLS connections, the Compose example uses `SSL Mode=VerifyFull`; configure the PostgreSQL hostname and trusted CA certificate to match your server.
 
-Copy the deployment files to the server while preserving their directories:
+The repository's `server/` directory contains the deployment files. Copy its contents into `~/cpr` on Athena; Dockerfiles and source code stay local:
 
 ```text
 ~/cpr/
-  server/
-    compose.yaml
-    sshd_config
-    worker-instructions.md
-  src/
-    Worker/
-      Dockerfile
-      .dockerignore
+  compose.yaml
+  sshd_config
+  worker-instructions.md
+  data/                     Persistent state, created by Compose
 ```
 
-If using a configured `compose.private.yaml`, place it at `server/compose.yaml`. C# source files are not needed on the server: the worker build copies the published executable from the orchestrator image. Edit `x-settings` in `server/compose.yaml` with the published image reference, database connection, GitHub token, Git name/email, desktop SSH public key and optional Rust toolchain. Keep the configured copy private, and write literal dollar signs as `$$` in Compose values.
+For a new installation, copy `server/compose.yaml` to `server/compose.private.yaml` and configure `x-settings` with both published image references, database connection, GitHub token, Git name/email and desktop SSH public key. Keep the configured copy private, and write literal dollar signs as `$$` in Compose values. For an existing installation, preserve its credentials, enabled flags, worker services, GPU assignments and `data/` directory; the nine-worker template does not need to replace your configured layout.
 
-Start the containers on the server:
+Copy the configured files and connect to the server:
 
 ```sh
-cd ~/cpr/server
-docker compose pull cpr-orchestrator
-docker compose up -d --build
+ssh athena 'mkdir -p ~/cpr'
+scp server/compose.private.yaml athena:~/cpr/compose.yaml
+scp server/sshd_config server/worker-instructions.md athena:~/cpr/
+ssh athena
 ```
 
-Worker execution and publication start disabled. Complete the client SSH setup below and sign in to Codex on each worker before enabling them.
+Start or update the containers from the deployment directory:
 
-The API listens on `127.0.0.1:18080`, and worker SSH ports listen on `127.0.0.1:22101`–`22109`. `docker compose logs --tail=100` shows startup output; `docker compose down` stops the deployment.
+```sh
+cd ~/cpr
+docker compose pull
+docker compose up -d
+```
+
+Compose pulls the published orchestrator and worker images; it performs no builds on Athena.
+
+In the template, worker execution and publication start disabled. Complete the client SSH setup below and sign in to Codex on each worker before enabling them.
+
+The API listens on `127.0.0.1:18080`, and worker SSH ports listen on `127.0.0.1:22101`–`22109` in the template, through `22115` in Athena's private configuration. `docker compose logs --tail=100` shows startup output; `docker compose down` stops the deployment.
 
 ### Client
 
@@ -310,10 +324,10 @@ These settings control the API address, local checkout directory, and ordinary H
 
 ### SSH
 
-Forward the server's API over SSH. Replace `server` with your server alias or `user@hostname`, leave this terminal open, and run CPR in another terminal:
+Forward the server's API over SSH using the `athena` alias. Leave this terminal open and run CPR in another terminal:
 
 ```sh
-ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 server
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 athena
 ```
 
 The CPR API does not require an API key. GitHub credentials stay in the orchestrator.
@@ -322,17 +336,17 @@ The CPR API does not require an API key. GitHub credentials stay in the orchestr
 
 ```sh
 mkdir -p ~/.ssh
-scp server:~/cpr/server/data/keys/cpr-worker-known_hosts ~/.ssh/cpr-worker-known_hosts
+scp athena:~/cpr/data/keys/cpr-worker-known_hosts ~/.ssh/cpr-worker-known_hosts
 chmod 600 ~/.ssh/cpr-worker-known_hosts
 ```
 
-Compare the keys with `ssh-keygen -lf ~/cpr/server/data/keys/cpr-worker-known_hosts` on the server. Add these blocks to `~/.ssh/config`, keeping the existing server configuration. Replace `server` with the server alias and `IdentityFile` with the private key matching `desktop-public-key` in Compose:
+Compare the keys with `ssh-keygen -lf ~/cpr/data/keys/cpr-worker-known_hosts` on the server. Add these blocks to `~/.ssh/config`, keeping the existing server configuration. Use the `athena` server alias and set `IdentityFile` to the private key matching `desktop-public-key` in Compose:
 
 ```sshconfig
-Host cpr-101 cpr-102 cpr-103 cpr-104 cpr-105 cpr-106 cpr-107 cpr-108 cpr-109
+Host cpr-101 cpr-102 cpr-103 cpr-104 cpr-105 cpr-106 cpr-107 cpr-108 cpr-109 cpr-110 cpr-111 cpr-112 cpr-113 cpr-114 cpr-115
     HostName 127.0.0.1
     User coder
-    ProxyJump server
+    ProxyJump athena
     IdentityFile ~/.ssh/id_ed25519_gpu
     IdentitiesOnly yes
     UserKnownHostsFile ~/.ssh/cpr-worker-known_hosts
@@ -365,6 +379,24 @@ Host cpr-108
 Host cpr-109
     Port 22109
     HostKeyAlias cpr-109
+Host cpr-110
+    Port 22110
+    HostKeyAlias cpr-110
+Host cpr-111
+    Port 22111
+    HostKeyAlias cpr-111
+Host cpr-112
+    Port 22112
+    HostKeyAlias cpr-112
+Host cpr-113
+    Port 22113
+    HostKeyAlias cpr-113
+Host cpr-114
+    Port 22114
+    HostKeyAlias cpr-114
+Host cpr-115
+    Port 22115
+    HostKeyAlias cpr-115
 ```
 
 Sign in with your ChatGPT account on each worker, using its SSH alias:
@@ -373,7 +405,7 @@ Sign in with your ChatGPT account on each worker, using its SSH alias:
 ssh -t cpr-101 codex login --device-auth
 ```
 
-Repeat for `cpr-102` through `cpr-109`. Codex credentials persist in each worker's state directory.
+Repeat for every deployed worker, through `cpr-115` on Athena. Codex credentials persist in each worker's state directory.
 
 After signing in to Codex on the workers, set `run-workers` and `publish-approved` to `'true'` in the server's `compose.yaml` and run `docker compose up -d` again. Publication still requires `cpr approve ID`.
 
@@ -431,5 +463,7 @@ docker run --rm --network host \
   --env CPR__GitStoragePath=/data/git \
   cpr:latest
 ```
+
+Build the independent worker image from the repository root with `docker build -f src/Worker/Dockerfile -t cpr-worker:latest .`.
 
 The local Docker profile starts the API only. The server Compose deployment supplies the worker containers, persistent Git storage, and orchestrator SSH configuration; its API stays on `127.0.0.1:18080` for the tunnel.

@@ -1,8 +1,16 @@
-ARG CPR_IMAGE=cpr:latest
-FROM ${CPR_IMAGE} AS cpr
+# syntax=docker/dockerfile:1
+FROM mcr.microsoft.com/dotnet/sdk:10.0.403 AS build
+WORKDIR /src
+COPY src/Worker/CPR.Worker.csproj src/Worker/
+COPY src/Protocol/CPR.Protocol.csproj src/Protocol/
+RUN dotnet restore src/Worker/CPR.Worker.csproj
+COPY src/Worker/ src/Worker/
+COPY src/Protocol/ src/Protocol/
+RUN dotnet publish src/Worker/CPR.Worker.csproj -c Release -o /published --no-restore -p:UseAppHost=true
 
-FROM node:22-bookworm
-ARG INSTALL_RUST=false
+FROM mcr.microsoft.com/dotnet/runtime:10.0.14 AS runtime
+
+FROM node:22-bookworm AS final
 ENV DEBIAN_FRONTEND=noninteractive DOTNET_ROOT=/usr/share/dotnet RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server git ca-certificates curl bash rsync libicu72 zlib1g \
@@ -13,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @openai/codex
 RUN usermod -l coder -d /state/home/coder -s /bin/bash -p '*' node && \
     mkdir -p /etc/cpr/keys /run/sshd
-RUN if [ "$INSTALL_RUST" = "true" ]; then curl -fsSL https://sh.rustup.rs -o /tmp/rustup.sh && \
+RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup.sh && \
     sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable --component rustfmt --component clippy --target wasm32-unknown-unknown && \
     rm /tmp/rustup.sh && \
     ln -s /opt/cargo/bin/cargo /usr/local/bin/cargo && \
@@ -23,9 +31,9 @@ RUN if [ "$INSTALL_RUST" = "true" ]; then curl -fsSL https://sh.rustup.rs -o /tm
     ln -s /opt/cargo/bin/cargo-fmt /usr/local/bin/cargo-fmt && \
     ln -s /opt/cargo/bin/rustfmt /usr/local/bin/rustfmt && \
     ln -s /opt/cargo/bin/cargo-clippy /usr/local/bin/cargo-clippy && \
-    ln -s /opt/cargo/bin/clippy-driver /usr/local/bin/clippy-driver; fi
-COPY --from=cpr /usr/share/dotnet /usr/share/dotnet
-COPY --from=cpr /opt/cpr-worker /opt/cpr-worker
+    ln -s /opt/cargo/bin/clippy-driver /usr/local/bin/clippy-driver
+COPY --from=runtime /usr/share/dotnet /usr/share/dotnet
+COPY --from=build /published /opt/cpr-worker
 RUN ln -s /opt/cpr-worker/CPR.Worker /usr/local/bin/cpr-worker
 ENV HOME=/state/home/coder CODEX_HOME=/state/home/coder/.codex CARGO_HOME=/state/cargo
 EXPOSE 22
