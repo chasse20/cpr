@@ -64,7 +64,7 @@ ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "CompletedAt" timestamp w
 ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "CleanedAt" timestamp with time zone NULL;
 
 -- Pin validation to its target and retain cleanup progress across restarts
--- PullRequestStatus: Blocked = 9, Removed = 10
+-- PullRequestStatus: Blocked = 9, Removed = 10, AwaitingDecision = 11, NoLongerNeeded = 12
 ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "ReviewedTargetSha" varchar(64) NULL;
 ALTER TABLE cpr."PullRequest" ADD COLUMN IF NOT EXISTS "CleanupRequestedAt" timestamp with time zone NULL;
 UPDATE cpr."PullRequest" SET "CleanupRequestedAt" = COALESCE( "CompletedAt", now() ) WHERE "Status" IN ( 7, 8 ) AND "CleanupRequestedAt" IS NULL;

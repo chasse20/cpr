@@ -35,7 +35,7 @@ namespace CPR.Worker.Reports
 			tempText.AppendLine( "\n## Checks\n" );
 			foreach ( ReviewCheck tempCheck in tResult.Checks )
 			{
-				tempText.AppendLine( $"- **{tempCheck.Status}** `{tempCheck.Command}` — {tempCheck.Details}\n  Artifact: {tempCheck.Artifact}" );
+				tempText.AppendLine( $"- **{tempCheck.Status}{( tempCheck.SupersededBy is null ? "" : "; superseded by " + tempCheck.SupersededBy )}** `{tempCheck.Command}` — {tempCheck.Details}\n  Artifact: {tempCheck.Artifact}" );
 			}
 			tempText.AppendLine( "\n## Limitations\n" );
 			tempText.AppendLine( tResult.Limitations.Count == 0 ? "No additional limitations were reported." : string.Join( '\n', tResult.Limitations.Select( x => "- " + x ) ) );

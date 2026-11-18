@@ -107,7 +107,7 @@ namespace CPR.Worker.Review
 			Workspace tempWorkspace = _review.Workspace;
 			ReviewPlan tempPlan = _review.Plan;
 			Workspace.RequireSha( tempPlan.HeadSha );
-			WorkerFailure.Require( tempPlan.Steps.Length > 0 && tempPlan.Steps.All( x => Regex.IsMatch( x.Name, "^[a-z][a-z0-9-]*$" ) && x.MaxAttempts > 0 && x.TimeoutSeconds >= 0 ), "Invalid review steps", "infrastructure" );
+			WorkerFailure.Require( tempPlan.IsReportRetry ? tempPlan.Steps.Length == 0 : tempPlan.Steps.Length > 0 && tempPlan.Steps.All( x => Regex.IsMatch( x.Name, "^[a-z][a-z0-9-]*$" ) && x.MaxAttempts > 0 ), "Invalid review steps", "infrastructure" );
 			_review.WorkspaceHead = await tempWorkspace.GitAsync( [ "rev-parse", "HEAD" ], tCancel );
 			if ( tempPlan.IsReportRetry || tempPlan.IsContinuation || tempPlan.ApprovedTreeSha is not null )
 			{
@@ -128,7 +128,13 @@ namespace CPR.Worker.Review
 			{
 				string tempSource = _review.SourceRun( _review.PreviousRun );
 				JsonObject tempManifest = Storage.ReadObject( Path.Combine( tempSource, "manifest.json" ) );
-				tempSource = _review.SourceRun( tempManifest[ "report_source_run" ]?.GetValue<string>() ?? tempSource );
+				string? tempReportSource = tempManifest[ "report_source_run" ]?.GetValue<string>();
+				if ( tempReportSource is null && tempManifest[ "status" ]?.GetValue<string>() == "failed" && tempManifest[ "current_attempt" ] is null && Storage.Read<ReviewPlan>( Path.Combine( tempSource, "plan.json" ) ).IsReportRetry )
+				{
+					tempReportSource = _review.PreviousCheckpoint;
+				}
+				tempSource = _review.SourceRun( tempReportSource ?? tempSource );
+				Storage.Update( _review.Manifest, x => { x[ "kind" ] = "report_retry"; x[ "report_source_run" ] = tempSource; } );
 				tempManifest = Storage.ReadObject( Path.Combine( tempSource, "manifest.json" ) );
 				_review.Target = tempManifest[ "target_sha" ]!.GetValue<string>();
 				_review.Integration = tempManifest[ "integration_target_sha" ]?.GetValue<string>() ?? "";
@@ -136,13 +142,21 @@ namespace CPR.Worker.Review
 				await tempWorkspace.GitAsync( [ "cat-file", "-e", _review.Target + "^{commit}" ], tCancel );
 				ReviewPlan tempSourcePlan = Storage.Read<ReviewPlan>( Path.Combine( tempSource, "plan.json" ) );
 				WorkerFailure.Require( tempSourcePlan.Context.GetProperty( "PullRequest" ).GetProperty( "base" ).GetProperty( "ref" ).GetString() == tempWorkspace.Request.TargetBranch, "Saved report belongs to a different target branch" );
-				Storage.Update( _review.Manifest, x => { x[ "kind" ] = "report_retry"; x[ "report_source_run" ] = tempSource; } );
 			}
 			else
 			{
-				await tempWorkspace.GitAsync( [ "fetch", "--no-tags", "origin", "refs/heads/" + tempWorkspace.Request.TargetBranch ], tCancel );
-				_review.Target = await tempWorkspace.GitAsync( [ "rev-parse", "FETCH_HEAD" ], tCancel );
-				WorkerFailure.Require( _review.Target == _review.ExpectedTarget, "Target changed while preparing review context" );
+				string? tempPinnedTarget = new ReviewContinuation( _review ).PinTarget();
+				if ( tempPinnedTarget is not null )
+				{
+					_review.Target = tempPinnedTarget;
+					await tempWorkspace.GitAsync( [ "cat-file", "-e", _review.Target + "^{commit}" ], tCancel );
+				}
+				else
+				{
+					await tempWorkspace.GitAsync( [ "fetch", "--no-tags", "origin", "refs/heads/" + tempWorkspace.Request.TargetBranch ], tCancel );
+					_review.Target = await tempWorkspace.GitAsync( [ "rev-parse", "FETCH_HEAD" ], tCancel );
+					WorkerFailure.Require( _review.Target == _review.ExpectedTarget, "Target changed while preparing review context" );
+				}
 				if ( _review.IsFeedbackRepair )
 				{
 					string tempBase = Storage.ReadText( Path.Combine( tempWorkspace.Job, "tree" ) );
@@ -271,7 +285,8 @@ namespace CPR.Worker.Review
 				}
 				JsonObject tempMetadata = Storage.ReadObject( Path.Combine( _review.Attempt, "attempt.json" ) );
 				string? tempDiagnosis = tempMetadata[ "report_recovery" ]?[ "diagnosis" ]?[ "category" ]?.GetValue<string>();
-				string tempCategory = tempResult.Relevance.Status is "not_needed" or "uncertain" ? "maintainer_decision" : tempResult.FailureKind != "none" ? tempResult.FailureKind : tempResult.Outcome == "blocked" ? "maintainer_decision" : tempDiagnosis ?? ( tempResult.Checks.Any( x => x.IsRequired && x.Status != "passed" && !( x.IsBaselineFailure && x.Status == "failed" ) ) ? "required_check" : tempResult.Outcome == "needs_followup" || tempResult.Coverage.Values.Any( x => x.Status == "incomplete" ) ? "unfinished_review" : "report_metadata" );
+				bool tempHasRelevanceEvidence = !string.IsNullOrWhiteSpace( tempResult.Relevance.Details ) && !string.IsNullOrWhiteSpace( tempResult.Relevance.Evidence );
+				string tempCategory = tempResult.Relevance.Status == "not_needed" ? ( tempHasRelevanceEvidence ? "not_needed" : "unfinished_review" ) : tempResult.Relevance.Status == "uncertain" ? "maintainer_decision" : tempResult.FailureKind != "none" ? tempResult.FailureKind : tempResult.Outcome == "blocked" ? "maintainer_decision" : tempDiagnosis ?? ( tempResult.Checks.Any( x => x.IsRequired && x.Status != "passed" && !( x.IsBaselineFailure && x.Status == "failed" ) ) ? "required_check" : tempResult.Outcome == "needs_followup" || tempResult.Coverage.Values.Any( x => x.Status == "incomplete" ) ? "unfinished_review" : "report_metadata" );
 				string tempAction = tempResult.FollowUp + " " + tempResult.Summary + " " + ( tempMetadata[ "report_recovery" ]?[ "diagnosis" ]?[ "next_action" ]?.GetValue<string>() ?? Storage.ReadText( Path.Combine( _review.Attempt, "gate.txt" ) ) );
 				tempFailure = new( tempCategory, tempAction[ ..Math.Min( tempAction.Length, 2000 ) ] );
 				Storage.Write( Path.Combine( _review.Attempt, "failure.json" ), new { category = tempFailure.Category, action = tempFailure.Message } );

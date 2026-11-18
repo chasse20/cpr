@@ -4,6 +4,7 @@ namespace CPR.Worker.Recovery
 	{
 		public required string Path { get; set; }
 		public required string Area { get; set; }
+		public required string FeedbackKey { get; set; }
 		public required string FailedCheck { get; set; }
 		public required string PassedCheck { get; set; }
 		public required string BeforeExcerpt { get; set; }

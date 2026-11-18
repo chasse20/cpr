@@ -41,7 +41,7 @@
 				"properties": {
 					"id": { "type": "string" },
 					"kind": { "type": "string", "enum": ["command", "inspection"] },
-					"command": { "type": "string" },
+					"command": { "type": "string", "description": "Actual executed command for kind command. Non-process inspections may use an empty string; describe the inspection in details and retain its artifact." },
 					"status": { "type": "string", "enum": ["passed", "failed", "blocked", "not_run"] },
 					"exit_code": { "type": ["integer", "null"] },
 					"is_required": { "type": "boolean" },

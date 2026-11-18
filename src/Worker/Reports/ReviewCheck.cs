@@ -11,5 +11,6 @@ namespace CPR.Worker.Reports
 		public required bool IsBaselineFailure { get; set; }
 		public required string Details { get; set; }
 		public required string Artifact { get; set; }
+		public string? SupersededBy { get; set; }
 	}
 }

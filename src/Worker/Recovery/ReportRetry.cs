@@ -24,7 +24,7 @@ namespace CPR.Worker.Recovery
 			WorkerFailure.Require( tempIndex == tempPlan.Steps.Length - 1 || tempIsSavedValidationRequired, "Unfinished review stages remain; report recovery cannot replace missing work" );
 			JsonObject tempMetadata = Storage.ReadObject( Path.Combine( tempAttempt, "attempt.json" ) );
 			ReviewResult tempResult = Storage.Read<ReviewResult>( Path.Combine( tempAttempt, "result.json" ), true );
-			WorkerFailure.Require( tempMetadata[ "step" ]?.GetValue<string>() == tempPlan.Steps[ tempIndex ].Name && tempMetadata[ "exit_code" ]?.GetValue<int>() == 0 && tempMetadata[ "status" ]?.GetValue<string>() == "executed" && tempResult.Outcome == "complete", "Saved review is incomplete; retry cannot invent missing work" );
+			WorkerFailure.Require( tempMetadata[ "step" ]?.GetValue<string>() == tempPlan.Steps[ tempIndex ].Name && tempMetadata[ "exit_code" ]?.GetValue<int>() == 0 && tempMetadata[ "status" ]?.GetValue<string>() == "executed" && tempResult.Outcome == "complete", "Saved review is incomplete; retry cannot invent missing work", "unfinished_review" );
 			string[] tempAttempts = [ .. Directory.GetDirectories( tempSource ).Where( x => File.Exists( Path.Combine( x, "attempt.json" ) ) ) ];
 			for ( int i = 0; i < tempIndex; ++i )
 			{
@@ -34,7 +34,10 @@ namespace CPR.Worker.Recovery
 			Workspace.RequireSha( tReview.OutputTree );
 			await tReview.Workspace.GitAsync( [ "cat-file", "-e", tReview.OutputTree + "^{tree}" ], tCancel );
 			tReview.WorkspaceTree = await tReview.Workspace.FingerprintAsync( tCancel );
-			tReview.IsHistorical = tReview.Plan.IsHistoricalReport || tReview.WorkspaceHead != tReview.Head || tReview.WorkspaceTree != tReview.OutputTree || tReview.Target != tReview.ExpectedTarget;
+			bool tempApprovedIntegration = tempManifest[ "kind" ]?.GetValue<string>() == "merge_repair" && tempPlan.ApprovedTreeSha is not null && tReview.WorkspaceHead != tReview.Head && await tReview.Workspace.GitAsync( [ "rev-parse", "HEAD^{tree}" ], tCancel ) == tempPlan.ApprovedTreeSha && ( await tReview.Workspace.GitResultAsync( [ "merge-base", "--is-ancestor", tReview.Head, "HEAD" ], tCancel ) ).IsSuccess;
+			// A newer target is integrated after approval. It does not invalidate unchanged
+			// reviewed code, its saved evidence, or the target already reviewed here.
+			tReview.IsHistorical = tReview.Plan.IsHistoricalReport || tReview.WorkspaceHead != tReview.Head && !tempApprovedIntegration || tReview.WorkspaceTree != tReview.OutputTree;
 			if ( !tReview.IsHistorical )
 			{
 				string tempMerge = Storage.ReadText( Path.Combine( tReview.Workspace.Root, ".git/MERGE_HEAD" ) );
@@ -80,7 +83,9 @@ namespace CPR.Worker.Recovery
 				tempIsComplete = await ValidateSavedAsync( tempPlan.Steps[ ^1 ].Name, tCancel );
 			}
 			Storage.Update( Path.Combine( tReview.Attempt, "attempt.json" ), x => { x[ "is_complete" ] = tempIsComplete; x[ "completed_at" ] = DateTimeOffset.UtcNow; } );
-			WorkerFailure.Require( tempIsComplete, "Saved report remains invalid; review work was not rerun. " + Storage.ReadText( Path.Combine( tReview.Attempt, "gate.txt" ) ), "report_metadata" );
+			string tempGate = Storage.ReadText( Path.Combine( tReview.Attempt, "gate.txt" ) );
+			string tempFailure = tempGate.Contains( " must pass or retain evidence", StringComparison.Ordinal ) || tempGate.Contains( " must pass before approved integration", StringComparison.Ordinal ) ? "required_check" : tempGate.Contains( "Scope audit must cover exactly", StringComparison.Ordinal ) ? "unfinished_review" : "report_metadata";
+			WorkerFailure.Require( tempIsComplete, "Saved report remains invalid; review work was not rerun. " + tempGate, tempFailure );
 		}
 
 		private async Task<bool> ValidateSavedAsync( string tStep, CancellationToken tCancel )

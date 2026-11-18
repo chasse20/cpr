@@ -29,7 +29,12 @@ namespace CPR.Service.Queue
 			tempRecovery.Category = tCategory;
 			tempRecovery.Action = tReason[ ..Math.Min( 2000, tReason.Length ) ];
 			tempRecovery.Save( tRequest );
-			tRequest.Status = PullRequestStatus.Blocked;
+			tRequest.Status = tCategory switch
+			{
+				"maintainer_decision" => PullRequestStatus.AwaitingDecision,
+				"not_needed" => PullRequestStatus.NoLongerNeeded,
+				_ => PullRequestStatus.Blocked
+			};
 			tRequest.PreparedSha = null;
 			tRequest.PreparedReviewRunId = null;
 			tRequest.ApprovedSha = null;

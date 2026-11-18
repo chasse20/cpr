@@ -6,5 +6,6 @@ namespace CPR.Worker.Recovery
 		public required string Summary { get; set; }
 		public required string NextAction { get; set; }
 		public required ReferenceRepair[] ReferenceRepairs { get; set; }
+		public required ResourceRepair? ResourceRepair { get; set; }
 	}
 }

@@ -79,7 +79,15 @@ namespace CPR.Service.Queue
 				{
 					ReviewRecovery tempRecovery = ReviewRecovery.Read( tempRequest );
 
-					if ( tempRequest.Status == PullRequestStatus.Processing && tempRecovery.OperationId is not null && tempRequest.WorkerId is not null && tempRequest.ApprovedSha is null && tempRequest.WorkReason is not ( PullRequestWorkReason.ManualTweak or PullRequestWorkReason.Interactive or PullRequestWorkReason.CiRecovery ) )
+					if ( tempRequest.Status == PullRequestStatus.Processing && tempRequest.WorkerId is not null && tempRequest.ApprovedSha is null && tempRequest.WorkReason is PullRequestWorkReason.ManualTweak or PullRequestWorkReason.Interactive or PullRequestWorkReason.CiRecovery )
+					{
+						// The interactive SSH session survives an orchestrator restart. Leave
+						// its worker assigned so /complete can capture the saved checkout.
+						tempRecovery.Action = "Manual session retained across orchestrator restart";
+						tempRecovery.Save( tempRequest );
+						tempRequest.LastError = tempRecovery.Action;
+					}
+					else if ( tempRequest.Status == PullRequestStatus.Processing && tempRecovery.OperationId is not null && tempRequest.WorkerId is not null && tempRequest.ApprovedSha is null )
 					{
 						tempRecovery.IsPending = true;
 						tempRecovery.Category = "interrupted";
@@ -92,6 +100,15 @@ namespace CPR.Service.Queue
 					{
 						WorkflowRules.Block( tempRequest, "Interrupted manual, approved, or legacy work; use connect to reconcile the saved workspace", "interrupted" );
 					}
+				}
+				List<PullRequest> tempBlocked = await tempContext.PullRequest.Where( x => x.Status == PullRequestStatus.Blocked ).ToListAsync( tCancel );
+				foreach ( PullRequest tempRequest in tempBlocked )
+				{
+				string? tempCategory = ReviewRecovery.Read( tempRequest ).Category;
+				if ( tempCategory is "maintainer_decision" or "not_needed" )
+				{
+					tempRequest.Status = tempCategory == "not_needed" ? PullRequestStatus.NoLongerNeeded : PullRequestStatus.AwaitingDecision;
+				}
 				}
 
 				await tempContext.SaveChangesAsync( tCancel );
@@ -242,7 +259,45 @@ namespace CPR.Service.Queue
 				}
 				else if ( !WorkflowRules.IsSameSource( tempRequest, tempSnapshot ) )
 				{
-					WorkflowRules.Block( tempRequest, "PR head or destination changed since review; use cpr review to reassess" );
+					ReviewRecovery tempRecovery = ReviewRecovery.Read( tempRequest );
+					if ( tempRequest.Status == PullRequestStatus.Blocked && tempRequest.WorkerId is null && tempRequest.WorkspaceWorkerId is not null && tempRequest.ApprovedSha is null && tempRequest.PublishedSha is null && tempRecovery.Attempts < 2 && !tGate.IsRunning( tId ) && WorkflowRules.IsSameBranch( tempRequest, tempSnapshot ) )
+					{
+						// A new source revision needs a fresh review. Workspace.PrepareAsync archives
+						// the old checkout before fetching it, retaining unpublished work.
+						tempRequest.RemoteSha = tempSnapshot.HeadSha;
+						tempRequest.WorkReason = PullRequestWorkReason.Rereview;
+						tempRequest.Status = PullRequestStatus.WaitingToBeProcessed;
+						tempRecovery.Attempts++;
+						tempRecovery.IsPending = false;
+						tempRecovery.IsContinuation = false;
+						tempRecovery.OperationId = null;
+						tempRecovery.Category = "snapshot";
+						tempRecovery.Action = "Source head changed; reassessing the new revision automatically";
+						tempRecovery.NextAttemptAt = null;
+						tempRecovery.Save( tempRequest );
+						tempRequest.LastError = tempRecovery.Action;
+					}
+					else
+					{
+						WorkflowRules.Block( tempRequest, "PR head or destination changed since review; use cpr review to reassess" );
+					}
+				}
+				else if ( tempRequest.Status == PullRequestStatus.Blocked && tempRequest.WorkerId is null && tempRequest.WorkspaceWorkerId is not null && tempRequest.ApprovedSha is null && !tGate.IsRunning( tId ) )
+				{
+					ReviewRecovery tempRecovery = ReviewRecovery.Read( tempRequest );
+					if ( tempRecovery.Category == "report_metadata" && tempRecovery.Attempts < 2 )
+					{
+						tempRequest.WorkReason = PullRequestWorkReason.ReportRetry;
+						tempRequest.Status = PullRequestStatus.WaitingToBeProcessed;
+						tempRecovery.Attempts++;
+						tempRecovery.IsPending = false;
+						tempRecovery.IsContinuation = false;
+						tempRecovery.OperationId = null;
+						tempRecovery.Action = "Retrying saved report and completion gates automatically";
+						tempRecovery.NextAttemptAt = null;
+						tempRecovery.Save( tempRequest );
+						tempRequest.LastError = tempRecovery.Action;
+					}
 				}
 
 				if ( WorkflowRules.IsFollowingCI( tempRequest ) )
@@ -255,7 +310,7 @@ namespace CPR.Service.Queue
 					else
 					{
 						long tempFrontId = await tContext.PullRequest
-							.Where( x => x.Repository == tempRequest.Repository && x.TargetBranch == tempRequest.TargetBranch && x.Status != PullRequestStatus.Merged && x.Status != PullRequestStatus.Closed && x.Status != PullRequestStatus.Removed )
+							.Where( x => x.Repository == tempRequest.Repository && x.TargetBranch == tempRequest.TargetBranch && x.PublishedSha != null && ( x.Status == PullRequestStatus.WaitingForCi || x.Status == PullRequestStatus.WaitingForMergeTurn || x.Status == PullRequestStatus.ReadyToBeMerged || x.PullRequestId == tId ) )
 							.OrderBy( x => x.PullRequestId ).Select( x => x.PullRequestId ).FirstAsync( tCancel );
 						WorkflowDecision tempDecision = WorkflowRules.Decide( tempRequest, tempFrontId == tempRequest.PullRequestId, tempSnapshot, tempChecks );
 
@@ -287,7 +342,7 @@ namespace CPR.Service.Queue
 
 			using IServiceScope tempScope = tScopes.CreateScope();
 			Context tempContext = tempScope.ServiceProvider.GetRequiredService<Context>();
-			PullRequestStatus[] tempStatuses = [ PullRequestStatus.ReadyForApproval, PullRequestStatus.Blocked, PullRequestStatus.Removed, PullRequestStatus.WaitingForCi, PullRequestStatus.CiFailure, PullRequestStatus.WaitingForMergeTurn, PullRequestStatus.ReadyToBeMerged ];
+			PullRequestStatus[] tempStatuses = [ PullRequestStatus.ReadyForApproval, PullRequestStatus.Blocked, PullRequestStatus.AwaitingDecision, PullRequestStatus.NoLongerNeeded, PullRequestStatus.Removed, PullRequestStatus.WaitingForCi, PullRequestStatus.CiFailure, PullRequestStatus.WaitingForMergeTurn, PullRequestStatus.ReadyToBeMerged ];
 			List<long> tempIds = await tempContext.PullRequest.AsNoTracking().Where( x => tempStatuses.Contains( x.Status ) && x.CleanupRequestedAt == null && x.ApprovedSha == null && x.WorkerId != null ).Select( x => x.PullRequestId ).ToListAsync( tCancel );
 
 			foreach ( long tempId in tempIds )
@@ -312,12 +367,20 @@ namespace CPR.Service.Queue
 				if ( tempRequest?.Worker is not null )
 				{
 					bool tempIsPublished = tempRequest.Status is PullRequestStatus.WaitingForCi or PullRequestStatus.CiFailure or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged;
+					bool tempIsTransfer = tempRequest.WorkspaceWorkerId is not null && tempRequest.WorkspaceWorkerId != tempRequest.WorkerId;
 
 					try
 					{
-						await tHistory.CaptureAsync( tempRequest.Worker, tempRequest, tCancel );
+						if ( !tempIsTransfer )
+						{
+							await tHistory.CaptureAsync( tempRequest.Worker, tempRequest, tCancel );
+						}
 
-						if ( tempIsPublished )
+						if ( tempIsTransfer )
+						{
+							await tWorkers.DetachAsync( tempRequest.Worker, tempRequest, tCancel );
+						}
+						else if ( tempIsPublished )
 						{
 							await tWorkers.ReleaseAsync( tempRequest.Worker, tempRequest, tCancel );
 						}
@@ -338,7 +401,7 @@ namespace CPR.Service.Queue
 
 							if ( tempCurrent is not null && tempCurrent.WorkerId == tempRequest.WorkerId && tempStatuses.Contains( tempCurrent.Status ) && tempCurrent.ApprovedSha is null )
 							{
-								tempCurrent.WorkspaceWorkerId = tempIsPublished ? null : tempRequest.WorkerId;
+								tempCurrent.WorkspaceWorkerId = tempIsTransfer ? tempRequest.WorkspaceWorkerId : tempIsPublished ? null : tempRequest.WorkerId;
 								tempCurrent.WorkerId = null;
 								await tempContext.SaveChangesAsync( tCancel );
 							}
@@ -375,6 +438,9 @@ namespace CPR.Service.Queue
 				using IServiceScope tempScope = tScopes.CreateScope();
 				Context tempContext = tempScope.ServiceProvider.GetRequiredService<Context>();
 				List<Worker> tempFree = await tempContext.Worker.Where( x => x.Status == WorkerStatus.Online && x.PullRequest == null ).OrderBy( x => x.WorkerId ).ToListAsync( tCancel );
+				HashSet<int> tempFreeIds = [ .. tempFree.Where( x => !tGate.CleaningWorkers.Contains( x.WorkerId ) ).Select( x => x.WorkerId ) ];
+				List<int> tempOnlineIds = await tempContext.Worker.Where( x => x.Status == WorkerStatus.Online ).Select( x => x.WorkerId ).ToListAsync( tCancel );
+				HashSet<int> tempTransferIds = [ .. tempOnlineIds.Where( x => !tGate.CleaningWorkers.Contains( x ) ) ];
 				List<PullRequest> tempJobs = await tempContext.PullRequest
 					.Where( x => x.WorkerId == null && ( x.Status == PullRequestStatus.WaitingToBeProcessed || ( _settings.IsPublicationEnabled && x.Status == PullRequestStatus.ReadyForApproval && x.ApprovedSha != null ) ) )
 					.OrderBy( x => x.ApprovedSha != null ? 0 : x.WorkReason == PullRequestWorkReason.ManualTweak || x.WorkReason == PullRequestWorkReason.Interactive || x.WorkReason == PullRequestWorkReason.CiRecovery || x.WorkReason == PullRequestWorkReason.Rereview || x.WorkReason == PullRequestWorkReason.ReportRetry || x.WorkReason == PullRequestWorkReason.FeedbackRepair ? 1 : x.WorkReason == PullRequestWorkReason.MergeConflict ? 2 : 3 )
@@ -404,7 +470,7 @@ namespace CPR.Service.Queue
 
 				foreach ( Worker tempWorker in tempFree.Where( x => !tGate.CleaningWorkers.Contains( x.WorkerId ) ) )
 				{
-					PullRequest? tempRequest = tempJobs.FirstOrDefault( x => x.WorkerId is null && !tGate.IsRunning( x.PullRequestId ) && ( x.WorkspaceWorkerId is null || x.WorkspaceWorkerId == tempWorker.WorkerId ) );
+					PullRequest? tempRequest = tempJobs.FirstOrDefault( x => x.WorkerId is null && !tGate.IsRunning( x.PullRequestId ) && ( x.WorkspaceWorkerId is null || x.WorkspaceWorkerId == tempWorker.WorkerId || x.ApprovedSha is not null && !tempFreeIds.Contains( x.WorkspaceWorkerId.Value ) && tempTransferIds.Contains( x.WorkspaceWorkerId.Value ) ) );
 
 					if ( tempRequest is not null )
 					{
@@ -415,8 +481,9 @@ namespace CPR.Service.Queue
 
 						tempRequest.StorageWorkerIds = [ .. tempRequest.StorageWorkerIds.Append( tempWorker.WorkerId ).Distinct() ];
 						tempRequest.WorkerId = tempWorker.WorkerId;
-						tempRequest.WorkspaceWorkerId = tempWorker.WorkerId;
+						tempRequest.WorkspaceWorkerId ??= tempWorker.WorkerId;
 						tempRequest.LastError = null;
+						tempFreeIds.Remove( tempWorker.WorkerId );
 
 						if ( tempRequest.Status == PullRequestStatus.WaitingToBeProcessed )
 						{
@@ -514,7 +581,7 @@ namespace CPR.Service.Queue
 						return;
 					}
 
-					if ( tempState.Status == "failed" && tempState.Category is not ( "transient" or "interrupted" ) )
+					if ( tempState.Status == "failed" && tempState.Category is not ( "transient" or "interrupted" ) && !( tempRecovery.IsContinuation && tempState.Category is "required_check" or "unfinished_review" or "missing_evidence" ) )
 					{
 						throw new ReviewFailureException( tempState.Category ?? "infrastructure", tempState.Action ?? "Inspect the saved worker failure" );
 					}
@@ -605,6 +672,33 @@ namespace CPR.Service.Queue
 				if ( !WorkflowRules.IsSameBranch( tempRequest, tempRemote ) )
 				{
 					throw new InvalidOperationException( "PR source branch or destination changed; request a fresh review before publication" );
+				}
+
+				if ( tempRequest.WorkspaceWorkerId != tempWorker.WorkerId )
+				{
+					Worker tempSource = await tempContext.Worker.AsNoTracking().SingleAsync( x => x.WorkerId == tempRequest.WorkspaceWorkerId, tCancel );
+					await tWorkers.MoveApprovedAsync( tempSource, tempWorker, tempRequest, tCancel );
+					await tGate.Mutex.WaitAsync( tCancel );
+
+					try
+					{
+						PullRequest tempCurrent = await tempContext.PullRequest.SingleAsync( x => x.PullRequestId == tId, tCancel );
+						if ( tempCurrent.Status != PullRequestStatus.ReadyForApproval || tempCurrent.ApprovedSha != tempRequest.ApprovedSha || tempCurrent.PreparedReviewRunId != tempRequest.PreparedReviewRunId || tempCurrent.WorkerId != tempWorker.WorkerId || tempCurrent.WorkspaceWorkerId != tempSource.WorkerId || tempCurrent.RemoteSha != tempRequest.RemoteSha || tempCurrent.MaintainerResolution != tempRequest.MaintainerResolution )
+						{
+							throw new InvalidOperationException( "Approval or workspace ownership changed during transfer; both checkouts retained" );
+						}
+
+						// Switch ownership only after the destination confirms the approved commit
+						tempCurrent.WorkspaceWorkerId = tempWorker.WorkerId;
+						tempCurrent.SessionId = null;
+						await tempContext.SaveChangesAsync( tCancel );
+						tempRequest = tempCurrent;
+						tempContext.Entry( tempCurrent ).State = EntityState.Detached;
+					}
+					finally
+					{
+						tGate.Mutex.Release();
+					}
 				}
 
 				// Retain approved repairs and finish the pending merge before newer integration
@@ -791,11 +885,12 @@ namespace CPR.Service.Queue
 						ReviewRecovery tempRecovery = ReviewRecovery.Read( tempRequest );
 						string tempCategory = tException is ReviewFailureException tempFailure ? tempFailure.Category : tException is TimeoutException || ReviewFailureException.IsTransient( tException.Message ) ? "transient" : "infrastructure";
 
-						if ( !tIsApprovalCleared && tempCategory is "transient" or "interrupted" && tempRecovery.Attempts < 2 && tempRecovery.OperationId is not null && tempRequest.WorkReason is not ( PullRequestWorkReason.ManualTweak or PullRequestWorkReason.Interactive or PullRequestWorkReason.CiRecovery ) )
+						if ( !tIsApprovalCleared && tempCategory is "transient" or "interrupted" or "required_check" or "unfinished_review" or "missing_evidence" && tempRecovery.Attempts < 2 && tempRecovery.OperationId is not null && tempRequest.WorkReason is not ( PullRequestWorkReason.ManualTweak or PullRequestWorkReason.Interactive or PullRequestWorkReason.CiRecovery or PullRequestWorkReason.ReportRetry ) )
 						{
 							tempRecovery.IsPending = true;
+							tempRecovery.IsContinuation = tempRecovery.IsContinuation || tempCategory is "required_check" or "unfinished_review" or "missing_evidence";
 							tempRecovery.Category = tempCategory;
-							tempRecovery.Action = "Temporary interruption; checking the worker before continuing: " + tException.Message[ ..Math.Min( 1500, tException.Message.Length ) ];
+							tempRecovery.Action = tempRecovery.IsContinuation ? "Continuing saved review work and rerunning affected validation: " + tException.Message[ ..Math.Min( 1450, tException.Message.Length ) ] : "Temporary interruption; checking the worker before continuing: " + tException.Message[ ..Math.Min( 1500, tException.Message.Length ) ];
 							tempRecovery.NextAttemptAt = DateTimeOffset.UtcNow.AddSeconds( 30 );
 							tempRecovery.Save( tempRequest );
 							tempRequest.LastError = tempRecovery.Action;

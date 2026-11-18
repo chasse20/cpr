@@ -46,7 +46,8 @@ namespace CPR.Service.Review
 
 		public static async Task<ReviewRun> GetPreparedAsync( Context tContext, PullRequest tRequest, CancellationToken tCancel )
 		{
-			ReviewRun? tempRun = await tContext.ReviewRun.SingleOrDefaultAsync( x => x.ReviewRunId == tRequest.PreparedReviewRunId && x.PullRequestId == tRequest.PullRequestId && x.WorkerId == tRequest.WorkspaceWorkerId, tCancel );
+			// Review provenance stays on the original worker when its approved checkout moves
+			ReviewRun? tempRun = await tContext.ReviewRun.SingleOrDefaultAsync( x => x.ReviewRunId == tRequest.PreparedReviewRunId && x.PullRequestId == tRequest.PullRequestId, tCancel );
 
 			if ( tempRun is null || tempRun.CommentBody is null || tempRun.PublishedSha is not null || tRequest.PreparedSha is null || tRequest.ReviewedTargetSha is null || tempRun.CommentBody != ReadPreparedBody( tempRun, tRequest ) )
 			{

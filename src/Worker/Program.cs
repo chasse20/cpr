@@ -37,10 +37,18 @@ try
 			await ProcessControl.CancelAsync( tempWorkspace, tempRequest.OperationId!, tempCancellation.Token );
 			Console.WriteLine( "CPR_CANCELLED" );
 		}
+		else if ( tempOperation == "commit-parked" )
+		{
+			using WorkerLock tempJobLock = new( Path.Combine( tempWorkspace.Job, "workspace.lock" ) );
+			WorkerFailure.Require( tempJobLock.IsAcquired, "Saved checkout is busy; preserving its active operation", "infrastructure" );
+			Console.WriteLine( "CPR_COMMIT|" + await tempWorkspace.CommitParkedAsync( tempRequest.ApprovedTree!, tempCancellation.Token ) );
+		}
 		else
 		{
 			using WorkerLock tempLock = new( Path.Combine( tempWorkspace.State, "worker.lock" ) );
 			WorkerFailure.Require( tempLock.IsAcquired && !ProcessControl.IsAnyAlive( tempWorkspace.State ), "Worker is busy; preserving its active operation", "infrastructure" );
+			using WorkerLock tempJobLock = new( Path.Combine( tempWorkspace.Job, "workspace.lock" ) );
+			WorkerFailure.Require( tempJobLock.IsAcquired, "Saved checkout is busy; preserving its active operation", "infrastructure" );
 			if ( tempOperation is "run" or "prepare" or "manual-tweak" or "commit" or "park" )
 			{
 				await tempWorkspace.PrepareAsync( tempCancellation.Token );
@@ -59,6 +67,13 @@ try
 					break;
 				case "commit":
 					Console.WriteLine( "CPR_COMMIT|" + await tempWorkspace.CommitAsync( tempRequest.ApprovedTree!, tempCancellation.Token ) );
+					break;
+				case "prepare-import":
+					Console.WriteLine( "CPR_IMPORT_PATH|" + new ApprovedWorkspace( tempWorkspace ).Prepare() );
+					break;
+				case "import-approved":
+					await new ApprovedWorkspace( tempWorkspace ).ImportAsync( tempCancellation.Token );
+					Console.WriteLine( "CPR_IMPORTED|" + tempRequest.ApprovedCommit );
 					break;
 				case "release":
 					tempWorkspace.RequireActive();

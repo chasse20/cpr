@@ -56,7 +56,7 @@ cpr approve ID
 
 Approval preserves the exact saved repairs, finishes any pending merge, integrates the latest target when needed, and publishes as soon as the required integration checks pass. It wakes scheduling immediately; execution waits for scheduling and worker availability.
 
-CPR retries temporary interruptions automatically, reconciles the worker before restarting anything, and resumes missing review stages with affected validation. Technical blockers receive focused correction within the configured attempt budget. Explicit cancellation and unresolved decisions stay stopped.
+CPR runs reviews, validation, repairs, recovery, and manual summaries without elapsed-time limits. Explicit cancellation and connection-failure detection remain active. CPR retries temporary interruptions automatically, reconciles the worker before restarting anything, and resumes missing review stages with affected validation. Automatic continuation retains the original target and captured context when the target branch advances; approval integrates and validates newer target changes. Technical blockers receive focused correction within the configured attempt budget. Explicit cancellation and unresolved decisions stay stopped.
 
 If a blocker needs your input:
 
@@ -69,6 +69,8 @@ Work in the saved session, then exit successfully to save its snapshot and a bri
 `connect` can open an incomplete initial review. On successful exit, CPR saves the manual changes and resumes any missing initial-review work; completed reviews keep the summary-only exit.
 
 `cpr status` lists active PRs and pending cleanup. Merged, closed, and removed PRs disappear once their files are fully cleaned; `cpr show ID` and database history remain available.
+
+`AwaitingDecision` asks for a maintainer resolution; use `cpr review ID --resolution TEXT` to record one and resume. `NoLongerNeeded` means the saved review found concrete redundancy or obsolescence. Inspect `cpr show ID`, then remove tracking or request another review if the PR still has a distinct purpose. Neither state publishes or closes the GitHub PR.
 
 Use `cpr review ID` to request a full rereview, `cpr retry ID` for a failed report with sufficient saved evidence, and `cpr cancel ID` to stop an automated review while preserving work. `cpr help` lists all commands.
 

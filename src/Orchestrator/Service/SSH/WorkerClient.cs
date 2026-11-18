@@ -25,9 +25,7 @@ namespace CPR.Service.SSH
 		public async Task<WorkerSnapshot> ExecuteAsync( Worker tWorker, PullRequest tRequest, ReviewPlan tPlan, CancellationToken tCancel )
 		{
 			bool tempIsPreserved = tPlan.IsReportRetry || ( tPlan.IsContinuation && tRequest.WorkspaceWorkerId is not null ) || tPlan.ApprovedTreeSha is not null || ( tPlan.IsFeedbackRepair && tRequest.WorkspaceWorkerId is not null && tRequest.PublishedSha is null );
-			int tempRepairBudget = ( tPlan.ReportRepairStep is null ? 0 : ( tPlan.ReportRepairStep.TimeoutSeconds + 15 ) * tPlan.ReportRepairStep.MaxAttempts ) + ( tPlan.RecoveryStep is null ? 0 : tPlan.RecoveryStep.TimeoutSeconds + 15 );
-			int tempTimeout = tPlan.IsReportRetry ? tempRepairBudget + tPlan.SavedValidationStep.TimeoutSeconds + 615 : tPlan.Steps.Any( x => x.TimeoutSeconds == 0 ) ? 0 : tPlan.Steps.Sum( x => ( x.TimeoutSeconds + 15 + tempRepairBudget ) * x.MaxAttempts ) + 600;
-			string tempOutput = await RunAsync( tWorker, "run", Request( tRequest ) with { Plan = tPlan, IsPreserved = tempIsPreserved }, tempTimeout, tCancel );
+			string tempOutput = await RunAsync( tWorker, "run", Request( tRequest ) with { Plan = tPlan, IsPreserved = tempIsPreserved }, 0, tCancel );
 
 			return ReadSnapshot( tempOutput );
 		}
@@ -43,8 +41,8 @@ namespace CPR.Service.SSH
 		public async Task<WorkerSnapshot> CompleteTweakAsync( Worker tWorker, PullRequest tRequest, string tTargetSha, CancellationToken tCancel )
 		{
 			ReviewStepSettings tempStep = _settings.ReviewSteps.Last( x => x.IsEnabled );
-			ManualPlan tempPlan = new( tRequest.RemoteSha, tTargetSha, tRequest.MaintainerResolution, tRequest.PublishedSha, _settings.Prompts[ PromptKind.TweakSummary ], tempStep.Model, "low", tempStep.TimeoutSeconds == 0 ? 180 : Math.Min( 180, tempStep.TimeoutSeconds ) );
-			string tempOutput = await RunAsync( tWorker, "manual-tweak", Request( tRequest ) with { IsPreserved = true, Manual = tempPlan }, 300, tCancel );
+			ManualPlan tempPlan = new( tRequest.RemoteSha, tTargetSha, tRequest.MaintainerResolution, tRequest.PublishedSha, _settings.Prompts[ PromptKind.TweakSummary ], tempStep.Model, "low" );
+			string tempOutput = await RunAsync( tWorker, "manual-tweak", Request( tRequest ) with { IsPreserved = true, Manual = tempPlan }, 0, tCancel );
 
 			return ReadSnapshot( tempOutput );
 		}
@@ -64,6 +62,58 @@ namespace CPR.Service.SSH
 		public Task ReleaseAsync( Worker tWorker, PullRequest tRequest, CancellationToken tCancel )
 		{
 			return RunAsync( tWorker, "release", Request( tRequest ), 120, tCancel );
+		}
+
+		public async Task MoveApprovedAsync( Worker tSource, Worker tDestination, PullRequest tRequest, CancellationToken tCancel )
+		{
+			WorkerRequest tempRequest = Request( tRequest ) with { IsPreserved = true, ApprovedTree = tRequest.ApprovedSha, ReviewedTarget = tRequest.ReviewedTargetSha };
+			string tempCommit = ReadLine( await RunAsync( tSource, "commit-parked", tempRequest, 120, tCancel ), "CPR_COMMIT" );
+			if ( !Regex.IsMatch( tempCommit, "^[a-f0-9]{40}$" ) )
+			{
+				throw new InvalidOperationException( "Invalid parked worker commit SHA" );
+			}
+
+			string tempDirectory = Path.GetFullPath( Path.Combine( _settings.GitStoragePath, tRequest.PullRequestId.ToString( CultureInfo.InvariantCulture ) ) );
+			Directory.CreateDirectory( tempDirectory );
+			await GitAsync( [ "init", "--bare", tempDirectory ], tCancel );
+			await GitAsync( [ "-C", tempDirectory, "fetch", "--no-tags", $"ssh://{tSource.SshHost}/workspace/jobs/{tRequest.PullRequestId}/repo", "HEAD" ], tCancel );
+			string tempFetched = await GitAsync( [ "-C", tempDirectory, "rev-parse", "FETCH_HEAD" ], tCancel );
+			string tempTree = await GitAsync( [ "-C", tempDirectory, "rev-parse", "FETCH_HEAD^{tree}" ], tCancel );
+			if ( tempFetched != tempCommit || tempTree != tRequest.ApprovedSha )
+			{
+				throw new InvalidOperationException( "Saved worker commit changed during transfer; original checkout retained" );
+			}
+
+			await GitAsync( [ "-C", tempDirectory, "merge-base", "--is-ancestor", tRequest.RemoteSha, tempCommit ], tCancel );
+			await GitAsync( [ "-C", tempDirectory, "merge-base", "--is-ancestor", tRequest.ReviewedTargetSha!, tempCommit ], tCancel );
+			await GitAsync( [ "-C", tempDirectory, "update-ref", "refs/cpr/approved", tempCommit ], tCancel );
+			string tempBundle = Path.Combine( tempDirectory, "approved-" + Guid.NewGuid().ToString( "N" ) + ".bundle" );
+			try
+			{
+				await GitAsync( [ "-C", tempDirectory, "bundle", "create", tempBundle, "refs/cpr/approved" ], tCancel );
+				tempRequest = tempRequest with { ApprovedCommit = tempCommit };
+				string tempDestination = ReadLine( await RunAsync( tDestination, "prepare-import", tempRequest, 120, tCancel ), "CPR_IMPORT_PATH" );
+				if ( !Regex.IsMatch( tempDestination, "^/[A-Za-z0-9_./-]+$" ) || tempDestination.Split( '/' ).Contains( ".." ) )
+				{
+					throw new InvalidOperationException( "Invalid worker import path" );
+				}
+
+				CommandResult tempCopy = await tCommand.RunAsync( "scp", [ "-O", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", tempBundle, tDestination.SshHost + ":" + tempDestination ], tTimeoutSeconds: 0, tCancel: tCancel );
+				if ( !tempCopy.IsSuccess )
+				{
+					throw new ReviewFailureException( "infrastructure", "Approved workspace transfer failed: " + tempCopy.Failure );
+				}
+
+				string tempImported = ReadLine( await RunAsync( tDestination, "import-approved", tempRequest, 0, tCancel ), "CPR_IMPORTED" );
+				if ( tempImported != tempCommit )
+				{
+					throw new InvalidOperationException( "Destination did not confirm the approved commit" );
+				}
+			}
+			finally
+			{
+				File.Delete( tempBundle );
+			}
 		}
 
 		public Task ParkAsync( Worker tWorker, PullRequest tRequest, CancellationToken tCancel )
@@ -106,6 +156,17 @@ namespace CPR.Service.SSH
 		private WorkerRequest Request( PullRequest tRequest )
 		{
 			return new( 1, tRequest.PullRequestId, tRequest.Repository, tRequest.Number, tRequest.TargetBranch, _settings.GitAuthorName, _settings.GitAuthorEmail );
+		}
+
+		private async Task<string> GitAsync( IEnumerable<string> tArguments, CancellationToken tCancel )
+		{
+			CommandResult tempResult = await tCommand.RunAsync( "git", tArguments, tTimeoutSeconds: 0, tCancel: tCancel );
+			if ( !tempResult.IsSuccess )
+			{
+				throw new ReviewFailureException( "infrastructure", "Approved workspace Git transfer failed: " + tempResult.Failure );
+			}
+
+			return tempResult.Output.Trim();
 		}
 
 		private async Task<string> RunAsync( Worker tWorker, string tOperation, WorkerRequest tRequest, int tTimeoutSeconds, CancellationToken tCancel )

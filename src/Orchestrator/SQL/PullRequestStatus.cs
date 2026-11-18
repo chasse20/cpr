@@ -13,6 +13,8 @@ namespace CPR.SQL
 		Merged = 7,
 		Closed = 8,
 		Blocked = 9,
-		Removed = 10
+		Removed = 10,
+		AwaitingDecision = 11,
+		NoLongerNeeded = 12
 	}
 }

@@ -40,6 +40,10 @@ namespace CPR.Worker.Review
 			if ( tReview.Plan.IsContinuation )
 			{
 				JsonObject tempManifest = Storage.ReadObject( tReview.Manifest );
+				if ( tReview.Target != tReview.ExpectedTarget )
+				{
+					tempPrompt.AppendLine( $"\nThe target has advanced to {tReview.ExpectedTarget}. This continuation remains pinned to {tReview.Target} and its saved context; latest-context.json records the newer observation. Complete the assigned review against the pinned target. CPR will integrate the latest target with affected validation during publication approval." );
+				}
 				tempPrompt.AppendLine( $"""
 
 					Continuation of saved work:

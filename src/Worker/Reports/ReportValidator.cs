@@ -43,11 +43,13 @@ namespace CPR.Worker.Reports
 			Require( tResult.Relevance.Status is "relevant" or "overlap", "Unresolved relevance blocks completion" );
 			Require( !string.IsNullOrWhiteSpace( tResult.Relevance.Details ) && !string.IsNullOrWhiteSpace( tResult.Relevance.Evidence ), "Relevance requires a decision and supporting evidence" );
 			Require( tResult.Checks.Select( x => x.Id ).Distinct( StringComparer.Ordinal ).Count() == tResult.Checks.Length, "Checks must have unique IDs" );
-			foreach ( ReviewCheck tempCheck in tResult.Checks )
+			for ( int tempIndex = 0; tempIndex < tResult.Checks.Length; ++tempIndex )
 			{
+				ReviewCheck tempCheck = tResult.Checks[ tempIndex ];
 				string tempLabel = $"Check '{tempCheck.Id}'";
-				Require( !string.IsNullOrWhiteSpace( tempCheck.Id ) && !string.IsNullOrWhiteSpace( tempCheck.Command ) && !string.IsNullOrWhiteSpace( tempCheck.Details ), tempLabel + " needs an ID, actual command, and result explanation" );
+				Require( !string.IsNullOrWhiteSpace( tempCheck.Id ) && !string.IsNullOrWhiteSpace( tempCheck.Details ), tempLabel + " needs an ID and result explanation" );
 				Require( tempCheck.Kind is "command" or "inspection", tempLabel + " kind must be command or inspection" );
+				Require( tempCheck.Kind != "command" || !string.IsNullOrWhiteSpace( tempCheck.Command ), tempLabel + " command checks need the actual executed command" );
 				Require( tempCheck.Status is "passed" or "failed" or "blocked" or "not_run", tempLabel + " has an invalid status" );
 				if ( tempCheck.Status == "passed" )
 				{
@@ -56,7 +58,7 @@ namespace CPR.Worker.Reports
 				}
 				else if ( tempCheck.Status == "failed" )
 				{
-					Require( tempCheck.ExitCode is not null and not 0, tempLabel + " failed checks require a nonzero exit code" );
+					Require( tempCheck.Kind == "inspection" ? tempCheck.ExitCode is null && !string.IsNullOrWhiteSpace( tempCheck.Artifact ) : tempCheck.ExitCode is not null and not 0, tempLabel + " failed commands require a nonzero exit code; failed inspections require retained evidence and a null exit code" );
 				}
 				else if ( tempCheck.Status == "blocked" )
 				{
@@ -66,7 +68,9 @@ namespace CPR.Worker.Reports
 				{
 					Require( tempCheck.ExitCode is null, tempLabel + " unrun checks require a null exit code" );
 				}
-				Require( !tempCheck.IsRequired || tempCheck.Status == "passed" || ( !tIsApproved && tempCheck.Status == "failed" && tempCheck.IsBaselineFailure && !string.IsNullOrWhiteSpace( tempCheck.Artifact ) ), tempLabel + ( tIsApproved ? " must pass before approved integration can publish" : " must pass or retain evidence of a demonstrated baseline failure" ) );
+				bool tempIsSuperseded = tempCheck.SupersededBy is not null && tResult.Checks.Skip( tempIndex + 1 ).Any( x => x.Id == tempCheck.SupersededBy && x.Status == "passed" && x.IsRequired && x.Kind == "command" && x.ExitCode == 0 && SameCommand( tempCheck.Command, x.Command ) );
+				Require( tempCheck.SupersededBy is null || tempCheck.Kind == "command" && tempCheck.Status == "failed" && tempCheck.ExitCode is not null and not 0 && !string.IsNullOrWhiteSpace( tempCheck.Artifact ) && tempIsSuperseded, tempLabel + " supersession needs a later passing required invocation of the same command" );
+				Require( !tempCheck.IsRequired || tempCheck.Status == "passed" || tempIsSuperseded || ( !tIsApproved && tempCheck.Status == "failed" && tempCheck.IsBaselineFailure && !string.IsNullOrWhiteSpace( tempCheck.Artifact ) ), tempLabel + ( tIsApproved ? " must pass before approved integration can publish" : " must pass or retain evidence of a demonstrated baseline failure" ) );
 			}
 			Require( tResult.Coverage.Keys.Order( StringComparer.Ordinal ).SequenceEqual( CoverageAreas ), "Coverage must contain correctness, resources, cleanup, and final_diff" );
 			foreach ( KeyValuePair<string, Assessment> tempPair in tResult.Coverage )
@@ -131,15 +135,43 @@ namespace CPR.Worker.Reports
 			foreach ( FeedbackDisposition tempItem in tItems )
 			{
 				WorkerFailure.Require( !string.IsNullOrWhiteSpace( tempItem.Reason ) && tempItem.Status is "fixed" or "already_fixed" or "not_applicable", "Unresolved CodeRabbit feedback must remain blocked", "unfinished_review" );
-				WorkerFailure.Require( tempItem.Checks.All( x => tResult.Checks.Any( y => y.Id == x && y.Status == "passed" ) ) && ( tempItem.Status != "fixed" || tempItem.Checks.Length > 0 ), "Fixed feedback needs retained passing evidence", "missing_evidence" );
+				string[] tempInvalid = [ .. tempItem.Checks.Where( x => !tResult.Checks.Any( y => y.Id == x && y.Status == "passed" ) ) ];
+				WorkerFailure.Require( tempInvalid.Length == 0, $"Feedback '{tempItem.Key}' references unknown or nonpassing checks: {string.Join( ", ", tempInvalid )}", "missing_evidence" );
+				WorkerFailure.Require( tempItem.Status != "fixed" || tempItem.Checks.Length > 0, $"Fixed feedback '{tempItem.Key}' needs retained passing evidence", "missing_evidence" );
 			}
 		}
 
-		public static void Normalize( ReviewResult tResult, ScopeAudit? tScope )
+		public static string[] Normalize( ReviewResult tResult, ScopeAudit? tAudit, ReviewScope? tScope )
 		{
-			IEnumerable<Assessment> tempAssessments = tResult.Coverage.Values.Concat( tScope?.Files.SelectMany( x => x.Rules.Values ) ?? [] );
+			if ( tResult.ScopeAudit != "evidence/scope_audit.json" && tResult.ScopeAudit.Contains( "evidence/scope_audit.json", StringComparison.Ordinal ) )
+			{
+				tResult.ScopeAudit = "evidence/scope_audit.json";
+			}
+			foreach ( ReviewCheck tempCheck in tResult.Checks.Where( x => x.Kind == "inspection" && x.Status == "passed" && string.IsNullOrWhiteSpace( x.Command ) && x.ExitCode == 0 && !string.IsNullOrWhiteSpace( x.Artifact ) ) )
+			{
+				tempCheck.ExitCode = null;
+			}
+			foreach ( ReviewCheck tempCheck in tResult.Checks.Where( x => x.Kind == "inspection" && x.Status == "passed" && x.ExitCode == 0 && !string.IsNullOrWhiteSpace( x.Artifact ) && Regex.IsMatch( x.Command, @"^git diff(?:\s|$)" ) ) )
+			{
+				tempCheck.Kind = "command";
+			}
+			IEnumerable<Assessment> tempAssessments = tResult.Coverage.Values.Concat( tAudit?.Files.SelectMany( x => x.Rules.Values ) ?? [] );
 			foreach ( Assessment tempAssessment in tempAssessments )
 			{
+				for ( int tempIndex = 0; tempIndex < tempAssessment.Checks.Count; ++tempIndex )
+				{
+					string tempId = tempAssessment.Checks[ tempIndex ];
+					if ( !tempId.EndsWith( "-final", StringComparison.Ordinal ) || tResult.Checks.Any( x => x.Id == tempId ) )
+					{
+						continue;
+					}
+					string tempStem = tempId[ ..^6 ];
+					ReviewCheck[] tempMatches = [ .. tResult.Checks.Where( x => x.Id == tempStem && x.Status == "passed" && !string.IsNullOrWhiteSpace( x.Artifact ) && ( x.Command.Contains( tempStem, StringComparison.Ordinal ) || x.Artifact.Contains( tempStem, StringComparison.Ordinal ) ) ) ];
+					if ( tempMatches.Length == 1 )
+					{
+						tempAssessment.Checks[ tempIndex ] = tempStem;
+					}
+				}
 				if ( tempAssessment.Status == "verified" && tResult.Checks.Any( x => x.Status == "passed" && tempAssessment.Checks.Contains( x.Id ) ) )
 				{
 					tempAssessment.Checks.RemoveAll( x => tResult.Checks.Any( y => y.Id == x && y.Status == "failed" && y.IsBaselineFailure ) );
@@ -149,6 +181,50 @@ namespace CPR.Worker.Reports
 			{
 				tempCheck.Kind = "inspection";
 			}
+			for ( int tempIndex = 0; tempIndex < tResult.Checks.Length; ++tempIndex )
+			{
+				ReviewCheck tempCheck = tResult.Checks[ tempIndex ];
+				if ( tempCheck.IsRequired && tempCheck.Kind == "command" && tempCheck.Status == "failed" && tempCheck.SupersededBy is null && !string.IsNullOrWhiteSpace( tempCheck.Artifact ) )
+				{
+					ReviewCheck? tempSuccessor = tResult.Checks.Skip( tempIndex + 1 ).FirstOrDefault( x => x.IsRequired && x.Kind == "command" && x.Status == "passed" && x.ExitCode == 0 && !string.IsNullOrWhiteSpace( x.Artifact ) && SameCommand( tempCheck.Command, x.Command ) );
+						tempCheck.SupersededBy = tempSuccessor?.Id;
+				}
+			}
+			foreach ( Assessment tempAssessment in tempAssessments )
+			{
+				if ( tempAssessment.Status == "verified" )
+				{
+					tempAssessment.Checks.RemoveAll( x => tResult.Checks.Any( y => y.Id == x && y.Status == "failed" && y.SupersededBy is not null && tempAssessment.Checks.Contains( y.SupersededBy ) ) );
+				}
+			}
+			if ( tAudit is null || tScope is null || tAudit.ComparisonBaseSha != tScope.ComparisonBaseSha || tAudit.HeadSha != tScope.HeadSha || tAudit.TargetSha != tScope.TargetSha )
+			{
+				return [];
+			}
+			HashSet<string> tempRequired = [ .. tScope.RequiredPaths ];
+			string[] tempIncluded = [ .. tAudit.Files.Select( x => x.Path ), .. tAudit.Exclusions.SelectMany( x => x.Paths ).Where( tempRequired.Contains ) ];
+			if ( tempIncluded.Length != tempRequired.Count || tempIncluded.Distinct( StringComparer.Ordinal ).Count() != tempRequired.Count || tempIncluded.Any( x => !tempRequired.Contains( x ) ) || tAudit.Files.Any( x => !tempRequired.Contains( x.Path ) ) )
+			{
+				return [];
+			}
+			string[] tempRemoved = [ .. tAudit.Exclusions.SelectMany( x => x.Paths ).Where( x => !tempRequired.Contains( x ) ) ];
+			if ( tempRemoved.Length > 0 )
+			{
+				foreach ( ScopeExclusion tempExclusion in tAudit.Exclusions )
+				{
+					tempExclusion.Paths = [ .. tempExclusion.Paths.Where( tempRequired.Contains ) ];
+				}
+				tAudit.Exclusions = [ .. tAudit.Exclusions.Where( x => x.Paths.Length > 0 ) ];
+			}
+
+			return tempRemoved;
+		}
+
+		private static bool SameCommand( string tBefore, string tAfter )
+		{
+			static string NormalizeCommand( string tCommand ) => Regex.Replace( tCommand.Trim(), @"^CARGO_TARGET_DIR=\S+\s+", "" );
+
+			return !string.IsNullOrWhiteSpace( tBefore ) && NormalizeCommand( tBefore ) == NormalizeCommand( tAfter );
 		}
 	}
 }

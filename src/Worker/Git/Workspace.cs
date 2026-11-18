@@ -67,12 +67,17 @@ namespace CPR.Worker.Git
 			}
 		}
 
-		public async Task PrepareAsync( CancellationToken tCancel )
+		public void RequireAvailable()
 		{
 			string tempPrevious = ReadActive();
 			WorkerFailure.Require( tempPrevious.Length == 0 || tempPrevious == Id || File.Exists( Path.Combine( State, "released-" + tempPrevious ) ), "Worker not released; preserving its checkout" );
 			string? tempLink = new DirectoryInfo( Root ).LinkTarget;
 			WorkerFailure.Require( tempLink is null ? !Directory.Exists( Root ) && !File.Exists( Root ) : tempPrevious.Length > 0 && tempLink == Path.Combine( Workspaces, tempPrevious, "repo" ), "Unexpected workspace path; preserving it" );
+		}
+
+		public async Task PrepareAsync( CancellationToken tCancel )
+		{
+			RequireAvailable();
 			bool tempIsExisting = Directory.Exists( Path.Combine( Stored, ".git" ) );
 			bool tempIsPreserved = Request.IsPreserved;
 			ReviewPlan? tempPlan = Request.Plan;
@@ -164,19 +169,33 @@ namespace CPR.Worker.Git
 		public async Task<string> CommitAsync( string tExpected, CancellationToken tCancel )
 		{
 			RequireActive();
+
+			return await CommitDirectoryAsync( tExpected, Root, tCancel );
+		}
+
+		public async Task<string> CommitParkedAsync( string tExpected, CancellationToken tCancel )
+		{
+			WorkerFailure.Require( File.Exists( Path.Combine( State, "released-" + Id ) ) && Directory.Exists( Path.Combine( Stored, ".git" ) ), "Saved checkout is not parked; preserving its active operation" );
+			Storage.RequireCanonical( Path.Combine( Stored, ".git" ) );
+
+			return await CommitDirectoryAsync( tExpected, Stored, tCancel );
+		}
+
+		private async Task<string> CommitDirectoryAsync( string tExpected, string tDirectory, CancellationToken tCancel )
+		{
 			RequireSha( tExpected );
-			WorkerFailure.Require( await GitAsync( [ "rev-parse", "HEAD" ], tCancel ) == Storage.ReadText( Path.Combine( Job, "base-sha" ) ), "Unexpected pre-approval commit; preserving workspace" );
-			WorkerFailure.Require( ( await GitResultAsync( [ "diff", "--quiet" ], tCancel ) ).IsSuccess && ( await GitAsync( [ "ls-files", "--others", "--exclude-standard" ], tCancel ) ).Length == 0, "Worker has edits outside the approved snapshot; complete the session again" );
-			WorkerFailure.Require( await GitAsync( [ "write-tree" ], tCancel ) == tExpected && Storage.ReadText( Path.Combine( Job, "tree" ) ) == tExpected, "Approved tree no longer matches the worker tree" );
-			if ( await GitAsync( [ "rev-parse", "HEAD^{tree}" ], tCancel ) != tExpected || File.Exists( Path.Combine( Root, ".git/MERGE_HEAD" ) ) )
+			WorkerFailure.Require( await GitAsync( [ "rev-parse", "HEAD" ], tCancel, tDirectory ) == Storage.ReadText( Path.Combine( Job, "base-sha" ) ), "Unexpected pre-approval commit; preserving workspace" );
+			WorkerFailure.Require( ( await GitResultAsync( [ "diff", "--quiet" ], tCancel, tDirectory ) ).IsSuccess && ( await GitAsync( [ "ls-files", "--others", "--exclude-standard" ], tCancel, tDirectory ) ).Length == 0, "Worker has edits outside the approved snapshot; complete the session again" );
+			WorkerFailure.Require( await GitAsync( [ "write-tree" ], tCancel, tDirectory ) == tExpected && Storage.ReadText( Path.Combine( Job, "tree" ) ) == tExpected, "Approved tree no longer matches the worker tree" );
+			if ( await GitAsync( [ "rev-parse", "HEAD^{tree}" ], tCancel, tDirectory ) != tExpected || File.Exists( Path.Combine( tDirectory, ".git/MERGE_HEAD" ) ) )
 			{
 				JsonObject tempCommit = Storage.ReadObject( Path.Combine( Job, "commit.json" ) );
 				string? tempMessage = tempCommit[ "commit_message" ]?.GetValue<string>();
 				WorkerFailure.Require( tempCommit[ "tree" ]?.GetValue<string>() == tExpected && ReportValidator.IsValidCommitMessage( tempMessage ), "A descriptive commit message for this snapshot is required; review before approving again", "report_metadata" );
 				Storage.WriteText( Path.Combine( Job, "commit-message.txt" ), tempMessage! );
-				await GitAsync( [ "commit", "--cleanup=verbatim", "--file", Path.Combine( Job, "commit-message.txt" ) ], tCancel );
+				await GitAsync( [ "-c", "core.hooksPath=/dev/null", "commit", "--cleanup=verbatim", "--file", Path.Combine( Job, "commit-message.txt" ) ], tCancel, tDirectory );
 			}
-			string tempSha = await GitAsync( [ "rev-parse", "HEAD" ], tCancel );
+			string tempSha = await GitAsync( [ "rev-parse", "HEAD" ], tCancel, tDirectory );
 			Storage.WriteText( Path.Combine( Job, "base-sha" ), tempSha );
 
 			return tempSha;

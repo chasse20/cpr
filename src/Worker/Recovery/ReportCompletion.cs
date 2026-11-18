@@ -23,23 +23,25 @@ namespace CPR.Worker.Recovery
 			{
 				try
 				{
+					File.Copy( Path.Combine( tReview.Attempt, "result.json" ), Path.Combine( tReview.Attempt, "result-before-repair.json" ), true );
+					ReportValidator.Normalize( tempResult, null, null );
 					foreach ( string tempArtifact in tempResult.Checks.Select( x => x.Artifact ).Append( tempResult.ScopeAudit ).Where( x => x.Length > 0 ) )
 					{
 						Storage.Evidence( tReview.Artifacts, tempArtifact );
 					}
-					ScopeAudit? tempScope = tempResult.ScopeAudit.Length > 0 ? Storage.Read<ScopeAudit>( Storage.Evidence( tReview.Artifacts, tempResult.ScopeAudit ), true ) : null;
-					File.Copy( Path.Combine( tReview.Attempt, "result.json" ), Path.Combine( tReview.Attempt, "result-before-repair.json" ), true );
+					ScopeAudit? tempScope = tempResult.ScopeAudit.Length > 0 ? ReadScopeAudit( Storage.Evidence( tReview.Artifacts, tempResult.ScopeAudit ) ) : null;
 					if ( tempScope is not null )
 					{
 						File.Copy( Storage.Evidence( tReview.Artifacts, tempResult.ScopeAudit ), Path.Combine( tReview.Attempt, "scope-before-repair.json" ), true );
 					}
-					ReportValidator.Normalize( tempResult, tempScope );
+					ReviewScope tempRequiredScope = Storage.Read<ReviewScope>( Path.Combine( tReview.Attempt, "output-scope.json" ), true );
+					string[] tempRemoved = ReportValidator.Normalize( tempResult, tempScope, tempRequiredScope );
 					Storage.Write( Path.Combine( tReview.Attempt, "result.json" ), tempResult, true );
 					if ( tempScope is not null )
 					{
 						Storage.Write( Storage.Evidence( tReview.Artifacts, tempResult.ScopeAudit ), tempScope, true );
 					}
-					Storage.Update( Path.Combine( tReview.Attempt, "attempt.json" ), x => x[ "report_normalization" ] = "Normalized historical coverage references or non-process visual inspection metadata; original report and check outcomes retained" );
+					Storage.Update( Path.Combine( tReview.Attempt, "attempt.json" ), x => x[ "report_normalization" ] = "Normalized report references, inspection metadata, legacy scope paths, and " + tempRemoved.Length + " out-of-scope exclusions; original report, scope audit, and check outcomes retained" );
 				}
 				catch ( Exception tException ) when ( tException is WorkerFailure or JsonException or IOException )
 				{
@@ -69,6 +71,24 @@ namespace CPR.Worker.Recovery
 			File.AppendAllText( Path.Combine( tReview.Attempt, "gate.txt" ), "\nAutomatic diagnosis is disabled; inspect the retained completion errors before retrying" );
 
 			return false;
+		}
+
+		private static ScopeAudit ReadScopeAudit( string tPath )
+		{
+			JsonObject tempJson = Storage.ReadObject( tPath );
+			if ( tempJson[ "exclusions" ] is JsonArray tempExclusions )
+			{
+				foreach ( JsonObject tempExclusion in tempExclusions.OfType<JsonObject>() )
+				{
+					if ( tempExclusion[ "paths" ] is null && tempExclusion[ "path" ] is JsonValue tempPath && tempPath.TryGetValue<string>( out string? tempValue ) && !string.IsNullOrWhiteSpace( tempValue ) )
+					{
+						tempExclusion.Remove( "path" );
+						tempExclusion[ "paths" ] = new JsonArray( JsonValue.Create( tempValue ) );
+					}
+				}
+			}
+
+			return tempJson.Deserialize<ScopeAudit>( Storage.ReportOptions ) ?? throw new JsonException( "Missing scope audit" );
 		}
 
 		private async Task<bool> WritePublicationAsync( int tNumber, CancellationToken tCancel )
@@ -134,15 +154,29 @@ namespace CPR.Worker.Recovery
 				string tempAuditPath = Storage.Evidence( tReview.Artifacts, tempResult.ScopeAudit );
 				File.Copy( tempAuditPath, Path.Combine( tempDirectory, "original-scope.json" ), true );
 				ScopeAudit tempAudit = Storage.Read<ScopeAudit>( tempAuditPath, true );
-				ApplyRecovery( tempResult, tempAudit, tempDiagnosis );
+				string? tempFeedbackPath = tReview.IsFeedbackRepair ? Storage.Evidence( tReview.Artifacts, "evidence/feedback-dispositions.json" ) : null;
+				FeedbackDisposition[] tempFeedback = tempFeedbackPath is null ? [] : Storage.Read<FeedbackDisposition[]>( tempFeedbackPath, true );
+				if ( tempFeedbackPath is not null )
+				{
+					File.Copy( tempFeedbackPath, Path.Combine( tempDirectory, "original-feedback.json" ), true );
+				}
+				ApplyRecovery( tempResult, tempAudit, tempFeedback, tempDiagnosis );
 				await tReview.RequireUnchangedAsync( tCancel );
 				Storage.Write( Path.Combine( tempDirectory, "candidate-result.json" ), tempResult, true );
 				Storage.Write( Path.Combine( tempDirectory, "candidate-scope.json" ), tempAudit, true );
+				if ( tempFeedbackPath is not null )
+				{
+					Storage.Write( Path.Combine( tempDirectory, "candidate-feedback.json" ), tempFeedback, true );
+				}
 				bool tempIsAccepted = false;
 				try
 				{
 					Storage.Write( Path.Combine( tReview.Attempt, "result.json" ), tempResult, true );
 					Storage.Write( tempAuditPath, tempAudit, true );
+					if ( tempFeedbackPath is not null )
+					{
+						Storage.Write( tempFeedbackPath, tempFeedback, true );
+					}
 					tempIsAccepted = await tReview.CheckReportAsync( tCancel, tGate: Path.Combine( tempDirectory, "candidate-gate.txt" ) );
 				}
 				finally
@@ -151,6 +185,10 @@ namespace CPR.Worker.Recovery
 					{
 						File.Copy( Path.Combine( tempDirectory, "original-result.json" ), Path.Combine( tReview.Attempt, "result.json" ), true );
 						File.Copy( Path.Combine( tempDirectory, "original-scope.json" ), tempAuditPath, true );
+						if ( tempFeedbackPath is not null )
+						{
+							File.Copy( Path.Combine( tempDirectory, "original-feedback.json" ), tempFeedbackPath, true );
+						}
 					}
 				}
 				if ( tempIsAccepted )
@@ -173,10 +211,10 @@ namespace CPR.Worker.Recovery
 			}
 		}
 
-		private void ApplyRecovery( ReviewResult tResult, ScopeAudit tAudit, RecoveryDiagnosis tDiagnosis )
+		private void ApplyRecovery( ReviewResult tResult, ScopeAudit tAudit, FeedbackDisposition[] tFeedback, RecoveryDiagnosis tDiagnosis )
 		{
-			WorkerFailure.Require( tResult.Outcome == "complete" && tDiagnosis.Category == "report_metadata" && tDiagnosis.ReferenceRepairs.Length is > 0 and <= 16, "Recovery cannot complete unfinished work or unsupported corrections", "report_metadata" );
-			WorkerFailure.Require( tDiagnosis.ReferenceRepairs.Select( x => ( x.Path, x.Area, x.FailedCheck ) ).Distinct().Count() == tDiagnosis.ReferenceRepairs.Length, "Duplicate recovery correction", "report_metadata" );
+			WorkerFailure.Require( tResult.Outcome == "complete" && tDiagnosis.Category == "report_metadata" && tDiagnosis.ReferenceRepairs.Length <= 16 && ( tDiagnosis.ReferenceRepairs.Length > 0 || tDiagnosis.ResourceRepair is not null ), "Recovery cannot complete unfinished work or unsupported corrections", "report_metadata" );
+			WorkerFailure.Require( tDiagnosis.ReferenceRepairs.Select( x => ( x.Path, x.Area, x.FeedbackKey, x.FailedCheck ) ).Distinct().Count() == tDiagnosis.ReferenceRepairs.Length, "Duplicate recovery correction", "report_metadata" );
 			foreach ( ReferenceRepair tempRepair in tDiagnosis.ReferenceRepairs )
 			{
 				ReviewCheck[] tempBefore = [ .. tResult.Checks.Where( x => x.Id == tempRepair.FailedCheck ) ];
@@ -185,20 +223,46 @@ namespace CPR.Worker.Recovery
 				WorkerFailure.Require( tempBefore[ 0 ].Status == "failed" && !tempBefore[ 0 ].IsRequired && tempBefore[ 0 ].ExitCode is not null and not 0 && tempAfter[ 0 ].Status == "passed" && tempAfter[ 0 ].ExitCode == 0, "Only optional historical failures with retained passing successors may be removed from verified references", "report_metadata" );
 				RequireExcerpt( tempBefore[ 0 ], tempRepair.BeforeExcerpt );
 				RequireExcerpt( tempAfter[ 0 ], tempRepair.AfterExcerpt );
-				Assessment? tempAssessment;
-				if ( tempRepair.Path.Length == 0 )
+				if ( tempRepair.Area == "feedback" )
 				{
-					tempAssessment = ReportValidator.CoverageAreas.Contains( tempRepair.Area ) ? tResult.Coverage.GetValueOrDefault( tempRepair.Area ) : null;
+					WorkerFailure.Require( tReview.IsFeedbackRepair && tempRepair.Path.Length == 0 && !string.IsNullOrWhiteSpace( tempRepair.FeedbackKey ), "Feedback recovery requires an exact feedback key and no file path", "report_metadata" );
+					FeedbackDisposition[] tempItems = [ .. tFeedback.Where( x => x.Key == tempRepair.FeedbackKey ) ];
+					WorkerFailure.Require( tempItems.Length == 1 && tempItems[ 0 ].Status == "fixed" && tReview.Feedback.Any( x => x.Key == tempItems[ 0 ].Key && x.Version == tempItems[ 0 ].Version ), "Feedback recovery requires an existing fixed disposition for the captured comment version", "report_metadata" );
+					WorkerFailure.Require( tempItems[ 0 ].Checks.Contains( tempRepair.FailedCheck ) && tempItems[ 0 ].Checks.Contains( tempRepair.PassedCheck ), "Both checks must already support the same fixed feedback disposition", "report_metadata" );
+					tempItems[ 0 ].Checks = [ .. tempItems[ 0 ].Checks.Where( x => x != tempRepair.FailedCheck ) ];
 				}
 				else
 				{
-					ScopeFile[] tempFiles = [ .. tAudit.Files.Where( x => x.Path == tempRepair.Path ) ];
-					tempAssessment = tempFiles.Length == 1 && ReportValidator.ScopeRules.Contains( tempRepair.Area ) ? tempFiles[ 0 ].Rules.GetValueOrDefault( tempRepair.Area ) : null;
+					WorkerFailure.Require( tempRepair.FeedbackKey.Length == 0, "Coverage recovery must not identify a feedback item", "report_metadata" );
+					Assessment? tempAssessment;
+					if ( tempRepair.Path.Length == 0 )
+					{
+						tempAssessment = ReportValidator.CoverageAreas.Contains( tempRepair.Area ) ? tResult.Coverage.GetValueOrDefault( tempRepair.Area ) : null;
+					}
+					else
+					{
+						ScopeFile[] tempFiles = [ .. tAudit.Files.Where( x => x.Path == tempRepair.Path ) ];
+						tempAssessment = tempFiles.Length == 1 && ReportValidator.ScopeRules.Contains( tempRepair.Area ) ? tempFiles[ 0 ].Rules.GetValueOrDefault( tempRepair.Area ) : null;
+					}
+					WorkerFailure.Require( tempAssessment is not null && tempAssessment.Status == "verified" && tempAssessment.Checks.Contains( tempRepair.FailedCheck ) && tempAssessment.Checks.Contains( tempRepair.PassedCheck ), "Both checks must already support the same verified assessment", "report_metadata" );
+					tempAssessment!.Checks.RemoveAll( x => x == tempRepair.FailedCheck );
 				}
-				WorkerFailure.Require( tempAssessment is not null && tempAssessment.Status == "verified" && tempAssessment.Checks.Contains( tempRepair.FailedCheck ) && tempAssessment.Checks.Contains( tempRepair.PassedCheck ), "Both checks must already support the same verified assessment", "report_metadata" );
-				tempAssessment!.Checks.RemoveAll( x => x == tempRepair.FailedCheck );
 			}
-			tResult.Limitations.Add( "Automatic report recovery corrected historical-failure references using retained before/after output. All original check outcomes remain recorded; no code review or tests were rerun." );
+			if ( tDiagnosis.ResourceRepair is ResourceRepair tempResourceRepair )
+			{
+				Assessment? tempResources = tResult.Coverage.GetValueOrDefault( "resources" );
+				WorkerFailure.Require( tResult.IsResourceMeasurementRequired && tempResources?.Status == "inspected", "Resource recovery requires an inspection-labeled assessment of required measurements", "report_metadata" );
+				WorkerFailure.Require( !string.IsNullOrWhiteSpace( tempResourceRepair.Reason ) && tempResourceRepair.Reason.Length <= 1000 && tempResourceRepair.BeforeCheck != tempResourceRepair.AfterCheck, "Resource recovery needs distinct before/after evidence and a justification", "report_metadata" );
+				ReviewCheck[] tempBefore = [ .. tResult.Checks.Where( x => x.Id == tempResourceRepair.BeforeCheck ) ];
+				ReviewCheck[] tempAfter = [ .. tResult.Checks.Where( x => x.Id == tempResourceRepair.AfterCheck ) ];
+				WorkerFailure.Require( tempBefore.Length == 1 && tempAfter.Length == 1, "Resource recovery references unknown or duplicate checks", "report_metadata" );
+				WorkerFailure.Require( tempBefore.Concat( tempAfter ).All( x => x.Kind == "command" && x.Status == "passed" && x.ExitCode == 0 && !string.IsNullOrWhiteSpace( x.Command ) && tempResources!.Checks.Contains( x.Id ) ), "Resource recovery requires already cited passing before/after commands", "report_metadata" );
+				RequireExcerpt( tempBefore[ 0 ], tempResourceRepair.BeforeExcerpt );
+				RequireExcerpt( tempAfter[ 0 ], tempResourceRepair.AfterExcerpt );
+				tempResources!.Status = "verified";
+				tResult.Limitations.Add( "Resource report recovery verified the already reported measurements against retained before/after evidence. Inspection-only conclusions and per-file scope assessments remain unchanged; verified resource coverage does not claim every path was measured." );
+			}
+			tResult.Limitations.Add( "Automatic report recovery reconciled metadata using retained before/after evidence. All original check outcomes and assessment explanations remain recorded; no code review, tests, or benchmarks were rerun." );
 		}
 
 		private void RequireExcerpt( ReviewCheck tCheck, string tExcerpt )

@@ -10,7 +10,7 @@ namespace CPR.Worker.Execution
 			ProcessControl.RequireOperation( tOperation );
 			Directory.CreateDirectory( tAttempt );
 			Storage.WriteText( Path.Combine( tAttempt, "prompt.txt" ), tPrompt );
-			List<string> tempArguments = [ "timeout", "--kill-after=15s", tStep.TimeoutSeconds.ToString( CultureInfo.InvariantCulture ), "codex", "--ask-for-approval", "never" ];
+			List<string> tempArguments = [ "codex", "--ask-for-approval", "never" ];
 			if ( tIsWritable )
 			{
 				tempArguments.AddRange( [ "-c", "sandbox_workspace_write.network_access=true" ] );

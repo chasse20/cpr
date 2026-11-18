@@ -74,7 +74,7 @@ namespace CPR.Worker.Sessions
 				{
 					Storage.WriteText( Path.Combine( tempRun, "tweak-checks.md" ), "No checks were recorded for this tweak session.\n" );
 				}
-				ReviewStep tempStep = new( "tweak-summary", tPlan.SummaryModel, tPlan.SummaryReasoningEffort, tPlan.SummaryTimeoutSeconds, 1, tPlan.SummaryPrompt );
+				ReviewStep tempStep = new( "tweak-summary", tPlan.SummaryModel, tPlan.SummaryReasoningEffort, 1, tPlan.SummaryPrompt );
 				string tempPrompt = tPlan.SummaryPrompt + $"\nSession evidence:\n- Session delta only: {tempRun}/tweak.patch and {tempRun}/tweak.stat\n- Session commits: {tempRun}/tweak-commits.txt\n- Session checks: {tempRun}/tweak-checks.md\n- Entry head: {tempEntryHead}; entry tree: {tempEntryTree}; exit head: {tempHead}; exit tree: {tempTree}\n- Entry pending merge: {tempEntry[ "merge" ]}; exit pending merge: {tempMerge}\n- Latest target: {tWorkspace.Request.TargetBranch} at {tPlan.TargetSha}\n- Complete outgoing delta for commit_message only: {tempRun}/changes.patch and {tempRun}/changes.stat";
 				Storage.Write( Path.Combine( tempAttempt, "attempt.json" ), new { step = "tweak-summary", attempt = 1, model = tempStep.Model, reasoning_effort = tempStep.ReasoningEffort, started_at = DateTimeOffset.UtcNow, input_tree = tempTree, status = "running" } );
 				int tempModelCode = await new ModelRunner( tWorkspace, Guid.NewGuid().ToString( "N" ) ).RunAsync( tempStep, tWorkspace.Root, tempAttempt, tempPrompt, ModelRunner.Schema( tempRun, "tweak-summary.schema.json" ), false, null, null, tCancel );

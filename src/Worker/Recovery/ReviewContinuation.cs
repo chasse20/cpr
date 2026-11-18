@@ -7,6 +7,38 @@ namespace CPR.Worker.Recovery
 {
 	public sealed class ReviewContinuation( ReviewExecution tReview )
 	{
+		public string? PinTarget()
+		{
+			if ( !tReview.Plan.IsContinuation || tReview.Plan.RecoveryAttempt == 0 || tReview.PreviousCheckpoint.Length == 0 )
+			{
+				return null;
+			}
+
+			string tempSource = tReview.SourceRun( tReview.PreviousCheckpoint );
+			ReviewPlan tempPlan = Storage.Read<ReviewPlan>( Path.Combine( tempSource, "plan.json" ) );
+			if ( tempPlan.OperationId != tReview.Plan.OperationId )
+			{
+				return null;
+			}
+
+			JsonObject tempManifest = Storage.ReadObject( Path.Combine( tempSource, "manifest.json" ) );
+			RequireCompatible( tempManifest, tempPlan );
+			string tempTarget = tempManifest[ "target_sha" ]!.GetValue<string>();
+			Workspace.RequireSha( tempTarget );
+			WorkerFailure.Require( Storage.ReadText( Path.Combine( tReview.Workspace.Job, "target-sha" ) ) == tempTarget, "Saved target integration changed; use connect to reconcile it" );
+
+			// Resume the original target and its evidence; approval integrates later target changes
+			string tempContextPath = Path.Combine( tempSource, "artifacts/context.json" );
+			Storage.RequireCanonical( tempContextPath );
+			JsonElement tempContext = Storage.Read<JsonElement>( tempContextPath );
+			WorkerFailure.Require( tempContext.GetProperty( "TargetSha" ).GetString() == tempTarget, "Saved context belongs to a different target revision" );
+			Storage.Write( Path.Combine( tReview.Artifacts, "latest-context.json" ), tReview.Plan.Context );
+			Storage.Write( Path.Combine( tReview.Artifacts, "context.json" ), tempContext );
+			Storage.Update( tReview.Manifest, x => x[ "observed_target_sha" ] = tReview.ExpectedTarget );
+
+			return tempTarget;
+		}
+
 		public async Task<int> ResumeAsync( CancellationToken tCancel )
 		{
 			string tempSource = tReview.PreviousCheckpoint;
@@ -24,7 +56,8 @@ namespace CPR.Worker.Recovery
 				tReview.SourceRun( tempSource );
 				JsonObject tempManifest = Storage.ReadObject( Path.Combine( tempSource, "manifest.json" ) );
 				ReviewPlan tempPlan = Storage.Read<ReviewPlan>( Path.Combine( tempSource, "plan.json" ) );
-				WorkerFailure.Require( tempManifest[ "head_sha" ]?.GetValue<string>() == tReview.Head && tempManifest[ "target_sha" ]?.GetValue<string>() == tReview.Target && tempPlan.MaintainerResolution == tReview.Plan.MaintainerResolution && tempPlan.PublishedSha == tReview.Plan.PublishedSha && tempPlan.Steps.SequenceEqual( tReview.Plan.Steps ) && tempPlan.Feedback.SequenceEqual( tReview.Plan.Feedback ), "Saved stages belong to different revisions, decisions, or review settings; use review to reassess or connect to reconcile integration" );
+				RequireCompatible( tempManifest, tempPlan );
+				WorkerFailure.Require( tempManifest[ "target_sha" ]?.GetValue<string>() == tReview.Target, "Saved stages belong to a different target revision; use review to reassess the integrated changes" );
 				if ( tReview.IsMergeRepair || tReview.IsFeedbackRepair )
 				{
 					tReview.ScopeBase = tempManifest[ "scope_base_tree" ]!.GetValue<string>();
@@ -96,6 +129,11 @@ namespace CPR.Worker.Recovery
 			Storage.WriteText( Path.Combine( tReview.Workspace.Job, "review-checkpoint" ), tReview.Run );
 
 			return tempResume;
+		}
+
+		private void RequireCompatible( JsonObject tManifest, ReviewPlan tPlan )
+		{
+			WorkerFailure.Require( tManifest[ "head_sha" ]?.GetValue<string>() == tReview.Head && tPlan.HeadSha == tReview.Head && tPlan.Context.GetProperty( "PullRequest" ).GetProperty( "base" ).GetProperty( "ref" ).GetString() == tReview.Workspace.Request.TargetBranch && tPlan.MaintainerResolution == tReview.Plan.MaintainerResolution && tPlan.PublishedSha == tReview.Plan.PublishedSha && tPlan.IsMergeRepair == tReview.Plan.IsMergeRepair && tPlan.IsFeedbackRepair == tReview.Plan.IsFeedbackRepair && tPlan.ApprovedTreeSha == tReview.Plan.ApprovedTreeSha && tPlan.Steps.SequenceEqual( tReview.Plan.Steps ) && tPlan.Feedback.SequenceEqual( tReview.Plan.Feedback ), "Saved stages belong to different revisions, decisions, or review settings; use review to reassess or connect to reconcile integration" );
 		}
 
 		public static bool IsCompleted( string tDirectory, string tStep )

@@ -102,12 +102,14 @@ namespace CPR.Service.Discord
 				PullRequestStatus.Merged => "Merged",
 				PullRequestStatus.Closed => "Closed",
 				PullRequestStatus.Blocked => "Blocked; needs your attention",
+				PullRequestStatus.AwaitingDecision => "Waiting for your decision",
+				PullRequestStatus.NoLongerNeeded => "Review found the PR no longer needed",
 				PullRequestStatus.Removed => "Tracking stopped",
 				_ => tRequest.Status.ToString()
 			};
 			string tempMessage = $"**CPR {tRequest.PullRequestId}: {tempStatus}**\nhttps://github.com/{tRequest.Repository}/pull/{tRequest.Number}\nObserved {DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss} UTC. Inspect: `cpr show {tRequest.PullRequestId}`";
 
-			string? tempDetail = tRequest.Status is PullRequestStatus.Blocked or PullRequestStatus.CiFailure ? tRequest.LastError : null;
+			string? tempDetail = tRequest.Status is PullRequestStatus.Blocked or PullRequestStatus.AwaitingDecision or PullRequestStatus.NoLongerNeeded or PullRequestStatus.CiFailure ? tRequest.LastError : null;
 
 			if ( !string.IsNullOrWhiteSpace( tempDetail ) )
 			{

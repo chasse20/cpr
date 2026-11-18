@@ -111,10 +111,11 @@ print_table() {
 }
 valid_id() { [[ $1 =~ ^[1-9][0-9]*$ ]] || fail 'ID must be a positive CPR ID'; }
 worker_host() {
-  local host
+  local host worker_id
   host=$(jq -r '.sshHost // empty' <<< "$1")
   [[ -n $host ]] || fail 'This PR has no assigned worker yet.'
-  [[ $host =~ ^cpr-10[1-9]$ ]] || fail "Unexpected worker SSH alias: $host"
+  worker_id=$(jq -r '.workerId // .workspaceWorkerId // empty' <<< "$1")
+  [[ $worker_id =~ ^[1-9][0-9]*$ && $host == "cpr-$worker_id" ]] || fail "Unexpected worker SSH alias: $host"
   printf '%s' "$host"
 }
 
@@ -198,7 +199,7 @@ case "$command_name" in
           (if (.scope_audit // "") != "" then "Scope audit: \(.scope_audit)" else empty end),
           (if .relevance != null then "Relevance: \(.relevance.status) — \(.relevance.details)" else empty end),
           (.findings[]? | "Finding [\(.severity)] \(.location): \(.impact)\n  Repair: \(.repair)"),
-          (.checks[]? | "Check [\(.status)] \(.command)\n  \(.details)"),
+          (.checks[]? | "Check [\(.status)\(if .superseded_by != null then "; superseded by " + .superseded_by else "" end)] \(.command)\n  \(.details)"),
           (.limitations[]? | "Limitation: \(.)"),
           (if .follow_up != null and .follow_up != "" then "Follow-up: \(.follow_up)" else empty end),
           .capture_error // empty),
@@ -245,7 +246,7 @@ case "$command_name" in
       fail 'Codex session did not exit successfully; edits remain on the worker.'
     fi
     printf 'Summarizing this session and saving the snapshot...\n'
-    result=$(request POST "/api/pr/$id/complete" '' 600)
+    result=$(request POST "/api/pr/$id/complete" '' 0)
     jq -r '"PR \(.id): \(.status); snapshot \(.preparedSha)"' <<< "$result"
     if [[ $(jq -r '.status' <<< "$result") == ReadyForApproval ]]; then
       printf 'Saved locally. Inspect with cpr show %s; publish with cpr approve %s.\n' "$id" "$id"

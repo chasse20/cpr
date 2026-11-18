@@ -217,7 +217,7 @@ namespace CPR.Service.Review
 					throw new InvalidOperationException( $"Unexpanded token in review step {tempStep.Name}" );
 				}
 
-				tempSteps.Add( new( tempStep.Name, tempStep.Model, tempStep.ReasoningEffort, tempStep.TimeoutSeconds, tempStep.MaxAttempts, tempPrompt ) );
+				tempSteps.Add( new( tempStep.Name, tempStep.Model, tempStep.ReasoningEffort, tempStep.MaxAttempts, tempPrompt ) );
 			}
 
 			JsonElement tempContext;
@@ -239,11 +239,11 @@ namespace CPR.Service.Review
 			}
 
 			ReviewStepSettings tempRepairSettings = tSettings.Value.ReportRepairStep;
-			ReviewStep? tempReportRepair = tempRepairSettings.IsEnabled ? new( tempRepairSettings.Name, tempRepairSettings.Model, tempRepairSettings.ReasoningEffort, tempRepairSettings.TimeoutSeconds, tempRepairSettings.MaxAttempts, PromptRenderer.Render( tempPrompts[ PromptKind.ReportRepair ], tRequest ) ) : null;
+			ReviewStep? tempReportRepair = tempRepairSettings.IsEnabled ? new( tempRepairSettings.Name, tempRepairSettings.Model, tempRepairSettings.ReasoningEffort, tempRepairSettings.MaxAttempts, PromptRenderer.Render( tempPrompts[ PromptKind.ReportRepair ], tRequest ) ) : null;
 			ReviewStepSettings tempRecoverySettings = tSettings.Value.RecoveryStep;
-			ReviewStep? tempRecovery = tempRecoverySettings.IsEnabled ? new( tempRecoverySettings.Name, tempRecoverySettings.Model, tempRecoverySettings.ReasoningEffort, tempRecoverySettings.TimeoutSeconds, 1, PromptRenderer.Render( tempPrompts[ PromptKind.ReportRecovery ], tRequest ) ) : null;
+			ReviewStep? tempRecovery = tempRecoverySettings.IsEnabled ? new( tempRecoverySettings.Name, tempRecoverySettings.Model, tempRecoverySettings.ReasoningEffort, 1, PromptRenderer.Render( tempPrompts[ PromptKind.ReportRecovery ], tRequest ) ) : null;
 			ReviewStepSettings tempValidation = tSettings.Value.ReviewSteps.Last( x => x.IsEnabled );
-			ReviewStep tempSavedValidation = new( "saved-validation", tempValidation.Model, "low", tempValidation.TimeoutSeconds == 0 ? 180 : Math.Min( 180, tempValidation.TimeoutSeconds ), 1, PromptRenderer.Render( tempPrompts[ PromptKind.SavedValidation ], tRequest ) );
+			ReviewStep tempSavedValidation = new( "saved-validation", tempValidation.Model, "low", 1, PromptRenderer.Render( tempPrompts[ PromptKind.SavedValidation ], tRequest ) );
 			ReviewPlan tempPlan = new
 			(
 				HeadSha: tRequest.RemoteSha,
@@ -304,9 +304,9 @@ namespace CPR.Service.Review
 				ValidateStep( tempStep, [ PromptKind.Correctness, PromptKind.Resources, PromptKind.Cleanup, PromptKind.FinalValidation, PromptKind.Relevance ] );
 			}
 
-			ValidateStep( tSettings.FeedbackRepairStep, [ PromptKind.FeedbackRepair, PromptKind.Correctness, PromptKind.Evidence ], tIsUnlimitedAllowed: true );
+			ValidateStep( tSettings.FeedbackRepairStep, [ PromptKind.FeedbackRepair, PromptKind.Correctness, PromptKind.Evidence ] );
 
-			if ( tSettings.CodeRabbitPollSeconds is < 5 or > 300 || tSettings.CodeRabbitQuietSeconds is < 10 or > 300 || tSettings.CodeRabbitFallbackQuietSeconds is < 120 or > 900 || tSettings.FeedbackRepairStep.MaxAttempts != 1 || tSettings.FeedbackRepairStep.TimeoutSeconds > 1800 || !tSettings.FeedbackRepairStep.Prompts.Contains( PromptKind.FeedbackRepair ) || !tSettings.FeedbackRepairStep.Prompts.Contains( PromptKind.Evidence ) )
+			if ( tSettings.CodeRabbitPollSeconds is < 5 or > 300 || tSettings.CodeRabbitQuietSeconds is < 10 or > 300 || tSettings.CodeRabbitFallbackQuietSeconds is < 120 or > 900 || tSettings.FeedbackRepairStep.MaxAttempts != 1 || !tSettings.FeedbackRepairStep.Prompts.Contains( PromptKind.FeedbackRepair ) || !tSettings.FeedbackRepairStep.Prompts.Contains( PromptKind.Evidence ) )
 			{
 				throw new InvalidOperationException( "CodeRabbit requires bounded polling, settling delays, and one focused repair with feedback and evidence prompts" );
 			}
@@ -314,9 +314,9 @@ namespace CPR.Service.Review
 			ValidateStep( tSettings.ReportRepairStep, [ PromptKind.ReportRepair ] );
 			ValidateStep( tSettings.RecoveryStep, [ PromptKind.ReportRecovery ] );
 
-			if ( tSettings.RecoveryStep.MaxAttempts != 1 || tSettings.RecoveryStep.TimeoutSeconds > 180 )
+			if ( tSettings.RecoveryStep.MaxAttempts != 1 )
 			{
-				throw new InvalidOperationException( "RecoveryStep permits one attempt capped at 180 seconds" );
+				throw new InvalidOperationException( "RecoveryStep permits one attempt" );
 			}
 
 			ValidateStep( tSettings.MergeRepairStep, [ PromptKind.MergeRepair, PromptKind.Correctness ] );
@@ -327,11 +327,11 @@ namespace CPR.Service.Review
 			}
 		}
 
-		private static void ValidateStep( ReviewStepSettings? tStep, PromptKind[] tAllowedPrompts, bool tIsUnlimitedAllowed = false )
+		private static void ValidateStep( ReviewStepSettings? tStep, PromptKind[] tAllowedPrompts )
 		{
-			if ( tStep is null || string.IsNullOrEmpty( tStep.Name ) || !Regex.IsMatch( tStep.Name, "^[a-z][a-z0-9-]{0,39}$" ) || string.IsNullOrEmpty( tStep.Model ) || !Regex.IsMatch( tStep.Model, "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" ) || tStep.ReasoningEffort is not ( "low" or "medium" or "high" or "xhigh" or "max" or "ultra" ) || !( tIsUnlimitedAllowed && tStep.TimeoutSeconds == 0 ) && ( tStep.TimeoutSeconds is < 60 or > 7200 ) || tStep.MaxAttempts is < 1 or > 3 || tStep.Prompts is null || tStep.Prompts.Length == 0 || tStep.Prompts.Any( x => !tAllowedPrompts.Contains( x ) ) )
+			if ( tStep is null || string.IsNullOrEmpty( tStep.Name ) || !Regex.IsMatch( tStep.Name, "^[a-z][a-z0-9-]{0,39}$" ) || string.IsNullOrEmpty( tStep.Model ) || !Regex.IsMatch( tStep.Model, "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" ) || tStep.ReasoningEffort is not ( "low" or "medium" or "high" or "xhigh" or "max" or "ultra" ) || tStep.MaxAttempts is < 1 or > 3 || tStep.Prompts is null || tStep.Prompts.Length == 0 || tStep.Prompts.Any( x => !tAllowedPrompts.Contains( x ) ) )
 			{
-				throw new InvalidOperationException( $"Invalid CPR review step '{tStep?.Name}': check its name, model, effort, timeout, attempts, and prompt kinds" );
+				throw new InvalidOperationException( $"Invalid CPR review step '{tStep?.Name}': check its name, model, effort, attempts, and prompt kinds" );
 			}
 		}
 	}
