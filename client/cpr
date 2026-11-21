@@ -22,6 +22,7 @@ Usage: cpr COMMAND
   cancel ID         Stop a review; preserve edits and release its worker
   review ID [--resolution TEXT]
                     Rereview, optionally recording a maintainer decision
+  continue ID       Continue unfinished review work with a fresh bounded allowance
   retry ID          Repair a saved final report without rerunning review or tests
   checkout ID       Copy the saved PR checkout locally
   connect ID        Open a manual session; summarize and save on exit
@@ -49,7 +50,7 @@ case "$command_name" in
   show)
     (($# == 1 || $# == 2)) || fail 'Usage: cpr show ID [--comment]'
     if (($# == 2)); then [[ $2 == --comment ]] || fail 'Usage: cpr show ID [--comment]'; fi ;;
-  connect|checkout|approve|remove|cancel|purge|retry)
+  connect|checkout|approve|remove|cancel|purge|retry|continue)
     (($# == 1)) || fail "Usage: cpr $command_name ID" ;;
   pause|resume)
     (($# == 1)) || fail "Usage: cpr $command_name WORKER_ID" ;;
@@ -214,7 +215,7 @@ case "$command_name" in
     fi
     result=$(request POST "/api/pr/$1/review" "$payload")
     jq -r '.message' <<< "$result" ;;
-  approve|remove|cancel|purge|retry)
+  approve|remove|cancel|purge|retry|continue)
     valid_id "$1"
     if [[ $command_name == remove ]]; then
       result=$(request DELETE "/api/pr/$1")

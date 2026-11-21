@@ -180,28 +180,34 @@ namespace CPR.Controller
 		[HttpDelete( "{id:long}" )]
 		public Task<IActionResult> RemoveAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, true, false, false, null, tCancel );
+			return ReviewOrRemoveAsync( tId, true, false, false, false, null, tCancel );
 		}
 
 		[HttpPost( "{id:long}/purge" )]
 		public Task<IActionResult> PurgeAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, true, true, false, null, tCancel );
+			return ReviewOrRemoveAsync( tId, true, true, false, false, null, tCancel );
 		}
 
 		[HttpPost( "{id:long}/review" )]
 		public Task<IActionResult> ReviewAsync( [FromRoute( Name = "id" )] long tId, [FromBody( EmptyBodyBehavior = EmptyBodyBehavior.Allow )] ReviewRequest? tRequest, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, false, false, false, tRequest?.Resolution, tCancel );
+			return ReviewOrRemoveAsync( tId, false, false, false, false, tRequest?.Resolution, tCancel );
+		}
+
+		[HttpPost( "{id:long}/continue" )]
+		public Task<IActionResult> ContinueAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
+		{
+			return ReviewOrRemoveAsync( tId, false, false, false, true, null, tCancel );
 		}
 
 		[HttpPost( "{id:long}/retry" )]
 		public Task<IActionResult> RetryAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, false, false, true, null, tCancel );
+			return ReviewOrRemoveAsync( tId, false, false, true, false, null, tCancel );
 		}
 
-		private async Task<IActionResult> ReviewOrRemoveAsync( long tId, bool tIsRemoved, bool tIsPurge, bool tIsReportRetry, string? tResolution, CancellationToken tCancel )
+		private async Task<IActionResult> ReviewOrRemoveAsync( long tId, bool tIsRemoved, bool tIsPurge, bool tIsReportRetry, bool tIsContinuation, string? tResolution, CancellationToken tCancel )
 		{
 			PullRequest? tempRequest;
 			await tGate.Mutex.WaitAsync( tCancel );
@@ -213,6 +219,11 @@ namespace CPR.Controller
 				if ( tempRequest is null )
 				{
 					return NotFound();
+				}
+
+				if ( tIsContinuation && ( tempRequest.Status != PullRequestStatus.Blocked || tempRequest.WorkspaceWorkerId is null || tempRequest.WorkReason is not ( PullRequestWorkReason.InitialReview or PullRequestWorkReason.Rereview ) || ReviewRecovery.Read( tempRequest ).Category is not ( "attempt_limit" or "unfinished_review" or "required_check" or "missing_evidence" or "interrupted" or "transient" ) ) )
+				{
+					return Conflict( new { Error = "Continue requires an unfinished full review with a saved workspace; resolve decisions with review --resolution, or use connect for manual repairs" } );
 				}
 
 				if ( tIsReportRetry && ( tempRequest.Status != PullRequestStatus.Blocked || tempRequest.WorkspaceWorkerId is null ) )
@@ -257,9 +268,9 @@ namespace CPR.Controller
 					return Conflict( new { Error = "PR is no longer open; tracked PRs will be completed and cleaned automatically" } );
 				}
 
-				if ( tIsReportRetry && !WorkflowRules.IsSameSource( tempRequest, tempRemote! ) )
+				if ( ( tIsReportRetry || tIsContinuation ) && !WorkflowRules.IsSameSource( tempRequest, tempRemote! ) )
 				{
-					return Conflict( new { Error = "PR head or destination changed; report retry cannot renew review coverage" } );
+					return Conflict( new { Error = "PR head or destination changed; request a fresh review before reusing saved work" } );
 				}
 
 				if ( tempRequest.Worker is not null )
@@ -307,13 +318,20 @@ namespace CPR.Controller
 						tempCurrent.HeadRepository = tempRemote.HeadRepository;
 						tempCurrent.HeadBranch = tempRemote.HeadBranch;
 						tempCurrent.RemoteSha = tempRemote.HeadSha;
-						tempCurrent.WorkReason = tIsReportRetry ? PullRequestWorkReason.ReportRetry : PullRequestWorkReason.Rereview;
-						tempCurrent.Recovery = "{}";
+						if ( tIsContinuation )
+						{
+							new ReviewRecovery { IsContinuation = true, Action = "Continuing the saved review with a fresh bounded attempt allowance" }.Save( tempCurrent );
+						}
+						else
+						{
+							tempCurrent.WorkReason = tIsReportRetry ? PullRequestWorkReason.ReportRetry : PullRequestWorkReason.Rereview;
+							tempCurrent.Recovery = "{}";
+						}
 						tempCurrent.Status = PullRequestStatus.WaitingToBeProcessed;
 						tempCurrent.CompletedAt = null;
 						tempCurrent.CleanupRequestedAt = null;
 						tempCurrent.CleanedAt = null;
-						tempCurrent.LastError = tIsReportRetry ? "Report retry requested; saved review and checks will be reused" : "Rereview requested; waiting for worker";
+						tempCurrent.LastError = tIsContinuation ? "Continuation requested; saved work and decisions retained" : tIsReportRetry ? "Report retry requested; saved review and checks will be reused" : "Rereview requested; waiting for worker";
 
 						if ( tResolution is not null )
 						{
@@ -326,7 +344,7 @@ namespace CPR.Controller
 					return Ok( new
 					{
 						Id = tId,
-						Message = tIsPurge ? "File deletion queued, including unpublished edits; database history retained" : tIsRemoved ? "Tracking stopped; saved work and database history retained. Use purge to delete the files" : tIsReportRetry ? "Report retry queued; no code review or test rerun, fresh approval will be required" : "Rereview queued with the latest comments; fresh approval will be required"
+						Message = tIsPurge ? "File deletion queued, including unpublished edits; database history retained" : tIsRemoved ? "Tracking stopped; saved work and database history retained. Use purge to delete the files" : tIsContinuation ? "Continuation queued; saved review work and decisions retained, fresh approval will be required" : tIsReportRetry ? "Report retry queued; no code review or test rerun, fresh approval will be required" : "Rereview queued with the latest comments; fresh approval will be required"
 					} );
 				}
 				finally
@@ -455,8 +473,9 @@ namespace CPR.Controller
 					return Conflict( new { Error = "Manual sessions require a saved workspace or a previously published CPR review" } );
 				}
 
+				PullRequestWorkReason? tempResumeReason = tempRequest.WorkReason is PullRequestWorkReason.InitialReview or PullRequestWorkReason.Rereview ? tempRequest.WorkReason : ReviewRecovery.Read( tempRequest ).ResumeWorkReason;
 				tempRequest.WorkReason = PullRequestWorkReason.ManualTweak;
-				tempRequest.Recovery = "{}";
+				new ReviewRecovery { ResumeWorkReason = tempResumeReason }.Save( tempRequest );
 				tempRequest.Status = tempRequest.WorkerId is null ? PullRequestStatus.WaitingToBeProcessed : PullRequestStatus.Processing;
 				tempRequest.PreparedSha = null;
 				tempRequest.PreparedReviewRunId = null;
@@ -615,7 +634,7 @@ namespace CPR.Controller
 
 					if ( tempNeedsReview )
 					{
-						tempCurrent.WorkReason = PullRequestWorkReason.InitialReview;
+						tempCurrent.WorkReason = ReviewRecovery.Read( tempRequest ).ResumeWorkReason ?? PullRequestWorkReason.InitialReview;
 						tempCurrent.ReviewedTargetSha = null;
 						new ReviewRecovery { IsContinuation = true, Action = "Manual repairs saved; queued the remaining initial review work and affected validation" }.Save( tempCurrent );
 					}

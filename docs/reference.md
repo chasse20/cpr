@@ -139,6 +139,7 @@ CPR checks access before recording approval and again before pushing. Missing ac
 | `POST /api/pr/{id}/purge` | Delete PR files, including edits; retain database history |
 | `POST /api/pr` | Add one PR with `{ "url": "..." }` |
 | `DELETE /api/pr/{id}` | Stop tracking; retain a Removed record and saved work |
+| `POST /api/pr/{id}/continue` | Continue an unfinished full review with a new bounded allowance, retaining compatible stages, evidence, decisions, and target |
 | `POST /api/pr/{id}/retry` | Queue report-only recovery for a blocked final review on its unchanged saved snapshot |
 | `POST /api/pr/{id}/review` | Queue rereview and invalidate approval; optional `{ "resolution": "..." }` records a maintainer decision (up to 16,000 characters) |
 | `GET /api/worker` | Worker status and assignments |
@@ -180,6 +181,8 @@ The `Resources` prompt requires an explicit optimization search and a separate m
 The runner records the original PR paths from its comparison base to its head and combines them with subsequent working-tree changes in `review-scope.json`. That scope remains in effect during full rereview and final validation; `git diff HEAD` alone is only the follow-up repair diff. Current repository style rules apply to complete affected functions and to types introduced anywhere in the original PR, even if the guide arrived later on the target branch.
 
 Final results must reference a retained JSON `scope_audit`. For full reviews it accounts for every original PR and repair path exactly once; merge repair accounts for conflict paths and subsequent integration repairs, with explicit exclusions for files needing none of the passes. Reviewed files identify their complete affected functions/types and separately assess naming, spacing, comments, organization, optimization, and memory. Type organization records introduced types and final files or applicable exceptions; resource assessments describe the searched paths and evidence limits. The gate rejects missing or duplicate paths, stale revisions, incomplete rule assessments, and unsupported verified claims. It validates coverage and evidence structure; the reviewer remains responsible for the truth of each inspection and exclusion. Formatter or lint success alone does not establish those semantic rules.
+
+A stage's `MaxAttempts` applies to one review operation, including automatic recovery. Exhaustion stops without scheduling retries that have no remaining attempts. `cpr continue ID` explicitly creates a new operation and allowance for a blocked unfinished full review. Reused attempts retain their originating operation and consume no new allowance; copied usage stays zero. Compatible completed stages, unfinished reports, evidence, the checkout, and maintainer decisions are preserved. The recorded target and context remain pinned; newer target changes are integrated at publication approval. Source, destination, decisions, settings, and target integration must still match before reuse. Final validation remains mandatory.
 
 `CPR:ReviewSteps` in [appsettings.json](../src/Orchestrator/appsettings.json) controls the enabled steps in order. Each has `Name`, `Model`, `ReasoningEffort`, `MaxAttempts`, `Prompts`, and optional `IsEnabled` (default `true`). Model and effort names must be supported by the installed Codex CLI and account; unsupported settings fail visibly. There is no silent model fallback.
 
@@ -230,6 +233,7 @@ Workers use `seccomp=unconfined` so Codex can create its sandbox namespaces insi
 | `cpr add https://github.com/OWNER/REPO/pull/123` | Queue one pull request |
 | `cpr remove ID` | Untrack a PR and preserve saved work |
 | `cpr review ID [--resolution TEXT]` | Reassess feedback, optionally record a maintainer decision, and require fresh approval |
+| `cpr continue ID` | Continue a blocked unfinished full review with a fresh bounded allowance; preserve compatible work and require final validation |
 | `cpr retry ID` | Repair and revalidate a saved final report without repeating review or tests |
 | `cpr checkout ID` | Copy the saved PR checkout locally |
 | `cpr connect ID` | Open the saved workspace; summarize on exit and resume missing initial-review work if necessary |

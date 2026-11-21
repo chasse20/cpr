@@ -72,6 +72,8 @@ Work in the saved session, then exit successfully to save its snapshot and a bri
 
 `AwaitingDecision` asks for a maintainer resolution; use `cpr review ID --resolution TEXT` to record one and resume. `NoLongerNeeded` means the saved review found concrete redundancy or obsolescence. Inspect `cpr show ID`, then remove tracking or request another review if the PR still has a distinct purpose. Neither state publishes or closes the GitHub PR.
 
+Use `cpr continue ID` to resume a blocked, unfinished full review with a fresh bounded attempt allowance. It preserves the checkout, compatible completed stages, evidence, decisions, and the recorded target. Automatic retries retain the current allowance; reaching the limit stops immediately with the unfinished work recorded. Final validation and separate publication approval remain required.
+
 Use `cpr review ID` to request a full rereview, `cpr retry ID` for a failed report with sufficient saved evidence, and `cpr cancel ID` to stop an automated review while preserving work. `cpr help` lists all commands.
 
 ## CodeRabbit and CI

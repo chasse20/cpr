@@ -234,7 +234,7 @@ namespace CPR.Worker.Review
 					tempNumber = tempSavedNumber;
 					tempPrevious = tempSaved;
 				}
-				if ( tempAttempt[ "exit_code" ]?.GetValue<int>() == 0 && tempAttempt[ "is_complete" ]?.GetValue<bool>() != true )
+				if ( ( tempAttempt[ "operation_id" ]?.GetValue<string>() ?? _review.Plan.OperationId ) == _review.Plan.OperationId && tempAttempt[ "exit_code" ]?.GetValue<int>() == 0 && tempAttempt[ "is_complete" ]?.GetValue<bool>() != true )
 				{
 					++tempConsumed;
 				}
@@ -249,7 +249,7 @@ namespace CPR.Worker.Review
 				ReviewScope tempScope = await _review.ScopeAsync( tempInputTree, tCancel );
 				Storage.Write( Path.Combine( _review.Attempt, "input-scope.json" ), tempScope, true );
 				Storage.Write( Path.Combine( _review.Artifacts, "review-scope.json" ), tempScope, true );
-				Storage.Write( Path.Combine( _review.Attempt, "attempt.json" ), new { step = tempStep.Name, attempt = tempNumber, model = tempStep.Model, reasoning_effort = tempStep.ReasoningEffort, started_at = DateTimeOffset.UtcNow, input_tree = tempInputTree, status = "running" } );
+				Storage.Write( Path.Combine( _review.Attempt, "attempt.json" ), new { step = tempStep.Name, attempt = tempNumber, operation_id = _review.Plan.OperationId, model = tempStep.Model, reasoning_effort = tempStep.ReasoningEffort, started_at = DateTimeOffset.UtcNow, input_tree = tempInputTree, status = "running" } );
 				Storage.Update( _review.Manifest, x => { x[ "attempts" ]!.AsArray().Add( _review.Attempt ); x[ "current_attempt" ] = _review.Attempt; } );
 				int tempCode = 143;
 				try
@@ -297,7 +297,13 @@ namespace CPR.Worker.Review
 				tempPrevious = _review.Attempt;
 			}
 
-			throw tempFailure ?? new WorkerFailure( "unfinished_review", "The saved stage exhausted its correction budget; use connect to repair the remaining work" );
+			string tempRemainingWork = tempFailure?.Message ?? "";
+			if ( tempRemainingWork.Length == 0 && tempPrevious.Length > 0 && File.Exists( Path.Combine( tempPrevious, "result.json" ) ) )
+			{
+				tempRemainingWork = Storage.Read<ReviewResult>( Path.Combine( tempPrevious, "result.json" ), true ).FollowUp;
+			}
+
+			throw new WorkerFailure( "attempt_limit", $"Review stage '{tempStep.Name}' used its {tempStep.MaxAttempts} attempts. Saved work is retained; use cpr continue {_review.Workspace.Request.Id} to continue unfinished work with a fresh bounded allowance, or connect for manual repairs. " + tempRemainingWork[ ..Math.Min( tempRemainingWork.Length, 1500 ) ] );
 		}
 
 		private void ReadSession()

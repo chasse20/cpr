@@ -9,14 +9,14 @@ namespace CPR.Worker.Recovery
 	{
 		public string? PinTarget()
 		{
-			if ( !tReview.Plan.IsContinuation || tReview.Plan.RecoveryAttempt == 0 || tReview.PreviousCheckpoint.Length == 0 )
+			if ( !tReview.Plan.IsContinuation || tReview.PreviousCheckpoint.Length == 0 )
 			{
 				return null;
 			}
 
 			string tempSource = tReview.SourceRun( tReview.PreviousCheckpoint );
 			ReviewPlan tempPlan = Storage.Read<ReviewPlan>( Path.Combine( tempSource, "plan.json" ) );
-			if ( tempPlan.OperationId != tReview.Plan.OperationId )
+			if ( tReview.Plan.RecoveryAttempt > 0 && tempPlan.OperationId != tReview.Plan.OperationId )
 			{
 				return null;
 			}
@@ -95,7 +95,7 @@ namespace CPR.Worker.Recovery
 					{
 						tempCheckpoint = tempAttempt[ "output_tree" ]?.GetValue<string>() ?? "";
 					}
-					if ( tempIndex < tempResume || ( tempIndex == tempResume && tempPlan.OperationId == tReview.Plan.OperationId ) )
+					if ( tempIndex <= tempResume )
 					{
 						string tempDestination = Path.Combine( tReview.Run, tempKey );
 						Directory.CreateDirectory( tempDestination );
@@ -107,6 +107,7 @@ namespace CPR.Worker.Recovery
 							}
 						}
 						tempAttempt[ "reused_from" ] ??= tempDirectory;
+						tempAttempt[ "operation_id" ] ??= tempPlan.OperationId;
 						tempAttempt[ "usage" ] = JsonSerializer.SerializeToNode( new Usage( 0, 0, 0, true ), Storage.ReportOptions );
 						tempAttempt.Remove( "report_recovery" );
 						tempAttempt.Remove( "report_repairs" );
