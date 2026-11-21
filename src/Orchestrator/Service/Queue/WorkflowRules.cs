@@ -55,7 +55,7 @@ namespace CPR.Service.Queue
 				return new( PullRequestStatus.CiFailure, tRequest.WorkReason );
 			}
 
-			if ( tIsFront && ( tRemote.Mergeable.Equals( "CONFLICTING", StringComparison.OrdinalIgnoreCase ) || tRemote.MergeStateStatus.Equals( "DIRTY", StringComparison.OrdinalIgnoreCase ) || tRemote.MergeStateStatus.Equals( "BEHIND", StringComparison.OrdinalIgnoreCase ) ) )
+			if ( tIsFront && ReviewRecovery.Read( tRequest ).Category != "cancelled" && ( tRemote.Mergeable.Equals( "CONFLICTING", StringComparison.OrdinalIgnoreCase ) || tRemote.MergeStateStatus.Equals( "DIRTY", StringComparison.OrdinalIgnoreCase ) || tRemote.MergeStateStatus.Equals( "BEHIND", StringComparison.OrdinalIgnoreCase ) ) )
 			{
 				return new( PullRequestStatus.WaitingToBeProcessed, PullRequestWorkReason.MergeConflict );
 			}

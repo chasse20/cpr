@@ -209,7 +209,7 @@ namespace CPR.Service.Review
 			return tempBody!;
 		}
 
-		private static void ValidateBody( string? tBody, int tLimit )
+		public static void ValidateBody( string? tBody, int tLimit )
 		{
 			if ( string.IsNullOrWhiteSpace( tBody ) || tBody.EnumerateRunes().Count() > tLimit || tBody.Any( x => char.IsControl( x ) && x is not ( '\n' or '\t' ) ) || tBody.Contains( "<!-- cpr-report:", StringComparison.Ordinal ) )
 			{

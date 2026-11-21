@@ -246,6 +246,12 @@ namespace CPR.Service.Queue
 					return;
 				}
 
+				// Cancellation remains stopped when a new source revision arrives
+				if ( tempRequest.Status == PullRequestStatus.Blocked && ReviewRecovery.Read( tempRequest ).Category == "cancelled" )
+				{
+					return;
+				}
+
 				if ( tempRequest.Status == PullRequestStatus.WaitingToBeProcessed && tempRequest.WorkerId is null && tempRequest.WorkspaceWorkerId is null )
 				{
 					tempRequest.RemoteSha = tempSnapshot.HeadSha;

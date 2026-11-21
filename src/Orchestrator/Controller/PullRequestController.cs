@@ -169,7 +169,7 @@ namespace CPR.Controller
 				tempRequest.CleanedAt,
 				tempRequest.LastError,
 				tempRequest.MaintainerResolution,
-				IsCodeRabbitEnabled = tSettings.Value.IsCodeRabbitEnabled && tSettings.Value.IsWorkerExecutionEnabled && tSettings.Value.FeedbackRepairStep.IsEnabled && tempRequest.Status is not ( PullRequestStatus.Merged or PullRequestStatus.Closed or PullRequestStatus.Removed or PullRequestStatus.AwaitingDecision or PullRequestStatus.NoLongerNeeded ),
+				IsCodeRabbitEnabled = tempRecovery.Category != "cancelled" && tSettings.Value.IsCodeRabbitEnabled && tSettings.Value.IsWorkerExecutionEnabled && tSettings.Value.FeedbackRepairStep.IsEnabled && tempRequest.Status is not ( PullRequestStatus.Merged or PullRequestStatus.Closed or PullRequestStatus.Removed or PullRequestStatus.AwaitingDecision or PullRequestStatus.NoLongerNeeded ),
 				CodeRabbit = JsonSerializer.Deserialize<FeedbackState>( tempRequest.ReviewFeedback ),
 				Recovery = tempRecovery,
 				NextAction = tempNext,

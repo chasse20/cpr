@@ -141,7 +141,7 @@ namespace CPR.Service.GitHub
 
 		private static bool IsEligible( PullRequest tRequest )
 		{
-			return tRequest.WorkerId is null && tRequest.ApprovedSha is null && tRequest.CleanupRequestedAt is null &&
+			return tRequest.WorkerId is null && tRequest.ApprovedSha is null && tRequest.CleanupRequestedAt is null && ReviewRecovery.Read( tRequest ).Category != "cancelled" &&
 				tRequest.Status is PullRequestStatus.ReadyForApproval or PullRequestStatus.Blocked or PullRequestStatus.WaitingForCi or PullRequestStatus.CiFailure or PullRequestStatus.WaitingForMergeTurn or PullRequestStatus.ReadyToBeMerged;
 		}
 
