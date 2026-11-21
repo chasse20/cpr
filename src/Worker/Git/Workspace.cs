@@ -14,6 +14,7 @@ namespace CPR.Worker.Git
 		public string Workspaces { get; } = Environment.GetEnvironmentVariable( "CPR_WORKSPACES" ) ?? "/workspace/jobs";
 		public string Job { get; }
 		public string Stored { get; }
+		public string Build { get; }
 		public string Url => $"https://github.com/{Request.Repository}/pull/{Request.Number}";
 		public string Id => Request.Id.ToString( CultureInfo.InvariantCulture );
 
@@ -24,8 +25,10 @@ namespace CPR.Worker.Git
 			WorkerFailure.Require( tRequest.Id > 0 && tRequest.Number > 0 && Regex.IsMatch( tRequest.Repository, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" ) && Regex.IsMatch( tRequest.TargetBranch, @"^[A-Za-z0-9._/-]+$" ), "Invalid workspace request", "infrastructure" );
 			Job = Path.Combine( State, "jobs", Id );
 			Stored = Path.Combine( Workspaces, Id, "repo" );
+			Build = Path.Combine( Workspaces, Id, "build" );
 			Storage.RequireCanonical( Job );
 			Storage.RequireCanonical( Stored );
+			Storage.RequireCanonical( Build );
 			Directory.CreateDirectory( Path.Combine( State, "jobs" ) );
 		}
 
@@ -78,6 +81,7 @@ namespace CPR.Worker.Git
 		public async Task PrepareAsync( CancellationToken tCancel )
 		{
 			RequireAvailable();
+			Directory.CreateDirectory( Build );
 			bool tempIsExisting = Directory.Exists( Path.Combine( Stored, ".git" ) );
 			bool tempIsPreserved = Request.IsPreserved;
 			ReviewPlan? tempPlan = Request.Plan;

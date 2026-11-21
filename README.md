@@ -68,6 +68,8 @@ Work in the saved session, then exit successfully to save its snapshot and a bri
 
 `connect` can open an incomplete initial review. On successful exit, CPR saves the manual changes and resumes any missing initial-review work; completed reviews keep the summary-only exit.
 
+Build targets and disposable review scratch are retained per job across retries and automatically removed when the PR is merged or closed. Shared Cargo dependency downloads remain cached.
+
 `cpr status` lists active PRs and pending cleanup. Merged, closed, and removed PRs disappear once their files are fully cleaned; `cpr show ID` and database history remain available.
 
 `AwaitingDecision` asks for a maintainer resolution; use `cpr review ID --resolution TEXT` to record one and resume. `NoLongerNeeded` means the saved review found concrete redundancy or obsolescence. Inspect `cpr show ID`, then remove tracking or request another review if the PR still has a distinct purpose. Neither state publishes or closes the GitHub PR.

@@ -6,5 +6,6 @@
 - Automated review sessions keep Git metadata and the index read-only inside Codex. Resolve conflicts in working-tree files and leave edits unstaged; CPR checks and stages the validated contents. Inspect `git diff HEAD` and `git diff HEAD --check`; unmerged index entries alone do not mean resolved file contents are still blocked.
 - A maintainer-requested manual connect session may explicitly authorize local staging and commits and recording its checks at the supplied path; it still must not push or merge the GitHub PR.
 - Do not edit CPR job state under `/state`. Retain review evidence outside the checkout at the path supplied by the orchestrator. Return its requested structured result; CPR writes the report.
+- Keep build targets, compiled probes, baseline checkouts, and disposable scratch in the supplied job build directory (CPR_BUILD_ROOT). Reuse CARGO_TARGET_DIR across attempts; put isolated builds beneath the same job directory. /state/cargo is for dependency downloads. Preserve probe sources and results in the supplied evidence directory.
 - Do not change unrelated files, credentials, SSH configuration, or the orchestrator.
 - If missing logs or context prevent a reliable fix, describe the blocker instead of guessing.

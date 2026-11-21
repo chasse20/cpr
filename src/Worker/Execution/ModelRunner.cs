@@ -18,7 +18,7 @@ namespace CPR.Worker.Execution
 			tempArguments.AddRange( [ "exec", "--sandbox", tIsWritable ? "workspace-write" : "read-only" ] );
 			if ( tIsWritable )
 			{
-				tempArguments.AddRange( [ "--add-dir", "/state/cargo", "--add-dir", tArtifacts! ] );
+				tempArguments.AddRange( [ "--add-dir", "/state/cargo", "--add-dir", tWorkspace.Build, "--add-dir", tArtifacts! ] );
 			}
 			else
 			{
@@ -36,6 +36,11 @@ namespace CPR.Worker.Execution
 			tempArguments.Add( "-" );
 			ProcessStartInfo tempInfo = Commands.CreateStartInfo( "setsid", tempArguments, tDirectory );
 			tempInfo.Environment[ "CPR_REVIEW_OPERATION" ] = tOperation;
+			if ( tIsWritable )
+			{
+				tempInfo.Environment[ "CPR_BUILD_ROOT" ] = tWorkspace.Build;
+				tempInfo.Environment[ "CARGO_TARGET_DIR" ] = Path.Combine( tWorkspace.Build, "target" );
+			}
 			using Process tempProcess = new() { StartInfo = tempInfo };
 			string tempRegistration = Path.Combine( tWorkspace.Job, "process-" + tOperation );
 			await using FileStream tempEvents = File.Create( Path.Combine( tAttempt, "events.jsonl" ) );
