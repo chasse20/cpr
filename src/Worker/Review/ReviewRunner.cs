@@ -222,6 +222,8 @@ namespace CPR.Worker.Review
 		{
 			ReviewStep tempStep = _review.Plan.Steps[ tIndex ];
 			_review.IsFinal = tIndex == _review.Plan.Steps.Length - 1;
+			string tempPriorStage = _review.Attempt;
+
 			int tempNumber = 0;
 			int tempConsumed = 0;
 			string tempPrevious = "";
@@ -254,7 +256,7 @@ namespace CPR.Worker.Review
 				int tempCode = 143;
 				try
 				{
-					tempCode = await _review.Model.RunAsync( tempStep, _review.Workspace.Root, _review.Attempt, ReviewPrompt.Render( _review, tempStep, tempPrevious ), ModelRunner.Schema( _review.Run, "result.schema.json" ), true, _review.Artifacts, _review.Session, tCancel );
+					tempCode = await _review.Model.RunAsync( tempStep, _review.Workspace.Root, _review.Attempt, ReviewPrompt.Render( _review, tempStep, tempPrevious, tempPriorStage ), ModelRunner.Schema( _review.Run, "result.schema.json" ), true, _review.Artifacts, _review.Session, tCancel );
 				}
 				finally
 				{

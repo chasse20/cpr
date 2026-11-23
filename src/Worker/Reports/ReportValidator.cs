@@ -24,6 +24,11 @@ namespace CPR.Worker.Reports
 			return tText is not null && tText.Length <= tLimit && ( !tIsRequired || !string.IsNullOrWhiteSpace( tText ) ) && !tText.Contains( "<!-- cpr-report:", StringComparison.Ordinal ) && tText.All( x => x is '\t' or '\n' || ( x >= 32 && ( x < 127 || x > 159 ) ) );
 		}
 
+		public static bool IsHandoff( ReviewResult tResult, bool tIsFinal )
+		{
+			return !tIsFinal && tResult.Outcome == "needs_followup" && tResult.FailureKind == "unfinished_review";
+		}
+
 		public static List<string> Validate( ReviewResult tResult, bool tIsFinal, bool tIsCommitRequired, bool tIsApproved )
 		{
 			List<string> tempErrors = [];
@@ -35,8 +40,16 @@ namespace CPR.Worker.Reports
 				}
 			}
 
-			Require( tResult.Outcome == "complete", "outcome must be complete after the assigned work is done" );
-			Require( tResult.FailureKind == "none", "failure_kind must be none after the assigned work is done" );
+			if ( IsHandoff( tResult, tIsFinal ) )
+			{
+				Require( !string.IsNullOrWhiteSpace( tResult.FollowUp ), "An intermediate review handoff needs concrete follow-up work" );
+				Require( !string.IsNullOrWhiteSpace( tResult.ScopeAudit ), "An intermediate review handoff needs a scope audit" );
+			}
+			else
+			{
+				Require( tResult.Outcome == "complete", "outcome must be complete after the assigned work is done" );
+				Require( tResult.FailureKind == "none", "failure_kind must be none after the assigned work is done" );
+			}
 			Require( !string.IsNullOrWhiteSpace( tResult.Summary ), "summary must explain the review result" );
 			Require( IsValidComment( tResult.PrComment, tIsRequired: tIsFinal ), "pr_comment must contain valid publication text, at most 12000 characters; final snapshots require a comment" );
 			Require( ( tResult.CommitMessage == "" && !( tIsFinal && tIsCommitRequired ) ) || IsValidCommitMessage( tResult.CommitMessage ), "commit_message needs a descriptive Auto: subject of at most 72 characters, a blank line before its body, and at most 4000 characters" );
@@ -110,7 +123,7 @@ namespace CPR.Worker.Reports
 			}
 		}
 
-		public static void ValidateScope( ScopeAudit tAudit, ReviewScope tScope, ReviewResult tResult )
+		public static void ValidateScope( ScopeAudit tAudit, ReviewScope tScope, ReviewResult tResult, bool tIsIncompleteAllowed = false )
 		{
 			WorkerFailure.Require( tAudit.ComparisonBaseSha == tScope.ComparisonBaseSha && tAudit.HeadSha == tScope.HeadSha && tAudit.TargetSha == tScope.TargetSha, "Scope audit belongs to different PR revisions", "report_metadata" );
 			WorkerFailure.Require( tAudit.Files.All( x => !string.IsNullOrWhiteSpace( x.Path ) && !string.IsNullOrWhiteSpace( x.Scope ) ), "Each file needs a path and complete affected function/type scope", "unfinished_review" );
@@ -123,7 +136,7 @@ namespace CPR.Worker.Reports
 				WorkerFailure.Require( tempFile.Rules.Keys.Order( StringComparer.Ordinal ).SequenceEqual( ScopeRules ), tempFile.Path + " must assess naming, spacing, comments, organization, optimization, and memory", "unfinished_review" );
 				foreach ( KeyValuePair<string, Assessment> tempRule in tempFile.Rules )
 				{
-					string[] tempErrors = [ .. ValidateAssessment( tempRule.Value, tempFile.Path + ": " + tempRule.Key, tResult.Checks, false ) ];
+					string[] tempErrors = [ .. ValidateAssessment( tempRule.Value, tempFile.Path + ": " + tempRule.Key, tResult.Checks, tIsIncompleteAllowed ) ];
 					WorkerFailure.Require( tempErrors.Length == 0, string.Join( "\n", tempErrors ), "unfinished_review" );
 				}
 			}

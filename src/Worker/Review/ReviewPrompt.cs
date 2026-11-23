@@ -4,9 +4,9 @@ namespace CPR.Worker.Review
 {
 	public static class ReviewPrompt
 	{
-		public static string Render( ReviewExecution tReview, ReviewStep tStep, string tPreviousAttempt )
+		public static string Render( ReviewExecution tReview, ReviewStep tStep, string tPreviousAttempt, string tPriorStage )
 		{
-			string tempScope = tReview.IsFeedbackRepair ? $"Handle only the captured CodeRabbit batch in {tReview.Artifacts}/feedback.json, conflict paths and subsequent repairs. Read prior-review.json for historical coverage. Record one disposition for each exact comment version in evidence/feedback-dispositions.json. Do not repeat the original full PR review." : tReview.IsMergeRepair ? $"Review only the conflict paths and subsequent integration repairs in required_paths. Read {tReview.Artifacts}/prior-review.json for prior coverage and its revision boundaries. Do not repeat unchanged original PR review or unrelated resource and cleanup passes." : "Full original PR scope remains required; complete missing cleanup, optimization, and memory work and account for every required path.";
+			string tempScope = tReview.IsFeedbackRepair ? $"Handle only the captured CodeRabbit batch in {tReview.Artifacts}/feedback.json, conflict paths and subsequent repairs. Read prior-review.json for historical coverage. Record one disposition for each exact comment version in evidence/feedback-dispositions.json. Do not repeat the original full PR review." : tReview.IsMergeRepair ? $"Review only the conflict paths and subsequent integration repairs in required_paths. Read {tReview.Artifacts}/prior-review.json for prior coverage and its revision boundaries. Do not repeat unchanged original PR review or unrelated resource and cleanup passes." : "The full original PR remains in scope. Account for every required path and follow the assigned stage instructions for remaining work.";
 			StringBuilder tempPrompt = new( tStep.Prompt );
 			if ( !string.IsNullOrWhiteSpace( tReview.Plan.MaintainerResolution ) )
 			{
@@ -54,6 +54,16 @@ namespace CPR.Worker.Review
 					- Revalidate affected functions, callers, guide compliance, and checks invalidated by partial or manual edits. Final validation must account for the complete current required_paths inventory and current evidence. Reuse only unaffected evidence. Preserve saved repairs and do not restart unrelated completed work.
 					""" );
 			}
+			if ( !tReview.IsFinal )
+			{
+				tempPrompt.AppendLine( "\nPrioritize confirmed defects and check the resulting changes. If review work remains, use outcome needs_followup and failure_kind unfinished_review to hand it to the next stage. Record concrete follow_up and retain a scope audit of every required path, marking unfinished assessments incomplete. Required checks and retained evidence must still satisfy the ordinary gates. Report substantive blockers using their specific failure kinds." );
+			}
+
+			if ( tPriorStage.Length > 0 )
+			{
+				tempPrompt.AppendLine( $"\nRead {tPriorStage}/result.json and its referenced scope audit and evidence for the preceding stage. Carry forward relevant findings and limitations, complete the remaining work assigned to this stage, and revalidate affected checks." );
+			}
+
 			if ( tPreviousAttempt.Length > 0 )
 			{
 				tempPrompt.AppendLine( $"\nThe previous attempt needs focused correction. Read {tPreviousAttempt}/result.json and {tPreviousAttempt}/gate.txt. Complete only the missing work or concrete repair and affected checks. Apply current repository code guides within that scope. Reuse valid evidence; preserve earlier repairs and original check outcomes. Return an updated result for this stage." );

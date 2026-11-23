@@ -78,8 +78,10 @@ namespace CPR.Worker.Recovery
 					Storage.CopyDirectory( tempEvidence, Path.Combine( tReview.Artifacts, "evidence" ) );
 				}
 				string[] tempAttempts = [ .. Directory.EnumerateDirectories( tempSource ).Where( x => File.Exists( Path.Combine( x, "attempt.json" ) ) ).Order( StringComparer.Ordinal ) ];
-				while ( tempResume < tReview.Plan.Steps.Length - 1 && tempAttempts.Any( x => IsCompleted( x, tReview.Plan.Steps[ tempResume ].Name ) ) )
+				string? tempCompleted;
+				while ( tempResume < tReview.Plan.Steps.Length - 1 && ( tempCompleted = Array.Find( tempAttempts, x => IsCompleted( x, tReview.Plan.Steps[ tempResume ].Name ) ) ) is not null )
 				{
+					tReview.Attempt = Path.Combine( tReview.Run, Path.GetFileName( tempCompleted ) );
 					++tempResume;
 				}
 				string tempCheckpoint = "";

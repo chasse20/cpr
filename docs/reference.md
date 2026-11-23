@@ -113,7 +113,7 @@ Use `cpr workers` to find a worker's ID, then `cpr pause 101` to stop new assign
 
 `src/Orchestrator/` contains the ASP.NET Core service. It owns PostgreSQL, scheduling, approval decisions, GitHub/CodeRabbit/CI polling, publication and notifications. Workers return local execution results; the orchestrator decides the PR state and whether publication is authorized. `Program.cs` hosts ASP.NET Core, `Controller/` exposes the HTTP API, and `Service/` groups queue processing, GitHub operations, SSH, and command execution.
 
-`SQL/` contains the EF Core context, entities, and persistence enums. [Create.sql](../src/Orchestrator/SQL/Create.sql) creates the `cpr` schema in your existing PostgreSQL database, its three tables (`Worker`, `PullRequest`, `ReviewRun`), indexes, and workers 101–115. It also creates the `cpr_app` login and grants runtime access to those tables. `PullRequest.CompletedAt` records GitHub's merge or closure time (falling back to the time CPR observes it); `CleanedAt` records successful file cleanup. The application does not run migrations or create schema. After updating for maintainer resolutions, rerun `Create.sql` to add the nullable `PullRequest.MaintainerResolution` column before deploying the new orchestrator and client. Only the orchestrator receives the database connection. Review prompts live in application configuration.
+`SQL/` contains the EF Core context, entities, and persistence enums. [Create.sql](../src/Orchestrator/SQL/Create.sql) creates the `cpr` schema in your existing PostgreSQL database, its three tables (`Worker`, `PullRequest`, `ReviewRun`), indexes, and workers 101–106. It also creates the `cpr_app` login and grants runtime access to those tables. `PullRequest.CompletedAt` records GitHub's merge or closure time (falling back to the time CPR observes it); `CleanedAt` records successful file cleanup. The application does not run migrations or create schema. After updating for maintainer resolutions, rerun `Create.sql` to add the nullable `PullRequest.MaintainerResolution` column before deploying the new orchestrator and client. Only the orchestrator receives the database connection. Review prompts live in application configuration.
 
 `GitStoragePath` is the orchestrator's staging directory for bare Git repositories. It fetches approved worker commits there, checks their contents, and pushes them to GitHub. The container uses `/data/git`; each PR's checkout lives at `/workspace/jobs/ID/repo` on its workspace worker. `/workspace/repo` points to the currently selected checkout.
 
@@ -181,9 +181,13 @@ Git preparation and target integration run in the C# worker executable. For full
 
 The `Resources` prompt requires an explicit optimization search and a separate memory-lifetime pass within the affected methods and callers. Reviewers evaluate credible candidates, implement justified improvements, and record why other candidates were rejected or deferred. Before/after measurements compare the prepared PR code with the candidate change, so missing target-branch functionality does not prevent an experiment. A no-change conclusion needs the inspected scope and supporting analysis. `coverage.resources.details` summarizes both Optimization and Memory in `cpr show ID`, with full evidence retained separately. Final validation independently revisits opportunities and completes missing work; unchanged source hashes and baseline benchmarks alone do not establish that the search happened. These are prompt requirements; the completion gate validates evidence structure, not the quality of the optimization analysis.
 
+For changes to executable code, tests, or build inputs, full reviews and focused repairs retain the project's normal local CI check or a locally runnable equivalent on the final relevant inputs. Follow CI wrappers and match the toolchain, profile, assertion settings, features, and environment that affect behavior. Keep the command and output as required evidence. Reuse that evidence while its inputs still apply, and use the smallest additional checks needed for the change.
+
 The runner records the original PR paths from its comparison base to its head and combines them with subsequent working-tree changes in `review-scope.json`. That scope remains in effect during full rereview and final validation; `git diff HEAD` alone is only the follow-up repair diff. Current repository style rules apply to complete affected functions and to types introduced anywhere in the original PR, even if the guide arrived later on the target branch.
 
 Final results must reference a retained JSON `scope_audit`. For full reviews it accounts for every original PR and repair path exactly once; merge repair accounts for conflict paths and subsequent integration repairs, with explicit exclusions for files needing none of the passes. Reviewed files identify their complete affected functions/types and separately assess naming, spacing, comments, organization, optimization, and memory. Type organization records introduced types and final files or applicable exceptions; resource assessments describe the searched paths and evidence limits. The gate rejects missing or duplicate paths, stale revisions, incomplete rule assessments, and unsupported verified claims. It validates coverage and evidence structure; the reviewer remains responsible for the truth of each inspection and exclusion. Formatter or lint success alone does not establish those semantic rules.
+
+An intermediate stage can hand unfinished review work to the next configured stage. It records concrete follow-up and a per-file audit of the assigned paths, with incomplete assessments marked explicitly. The worker verifies the audit inventory, required checks, retained evidence, and diff before advancing. The next stage receives the saved result and audit. Final validation still requires complete coverage and checks before publication approval.
 
 A stage's `MaxAttempts` applies to one review operation, including automatic recovery. Exhaustion stops without scheduling retries that have no remaining attempts. `cpr continue ID` explicitly creates a new operation and allowance for a blocked unfinished full review. Reused attempts retain their originating operation and consume no new allowance; copied usage stays zero. Compatible completed stages, unfinished reports, evidence, the checkout, and maintainer decisions are preserved. The recorded target and context remain pinned; newer target changes are integrated at publication approval. Source, destination, decisions, settings, and target integration must still match before reuse. Final validation remains mandatory.
 
@@ -205,11 +209,9 @@ Full review files live under `/state/cpr/jobs/ID/runs/RUN/` on the worker until 
 
 The worker image always includes stable Rust, rustfmt, Clippy, rustdoc and the `wasm32-unknown-unknown` target for reviewing Rust repositories. The standard `./src/Worker/PushToDocker.sh` command includes this tooling automatically. The worker needs Bash for interactive sessions and container setup, but its review logic and JSON validation are C#. jq remains a dependency of the desktop Bash client only.
 
-The example has nine workers: 101–103 use GPU `0`, 104–106 use GPU `1`, and 107–109 use GPU `2`. Each worker defines its own `device_ids`; GPU indices and UUIDs are supported. Change these assignments to match the machine, or remove a worker's `deploy` block to run it without a GPU.
+The Compose template assigns workers 101–106 to three GPUs, two per GPU. Set each worker's `device_ids` to the host's GPU indices or UUIDs, or remove its `deploy` block for CPU-only use. Athena's private configuration pins each worker to 20 physical cores with both SMT threads on one NUMA node and reserves the other 16 logical CPUs for the orchestrator. Use CPU ranges that match the host's topology.
 
-Athena's private Compose configuration uses fifteen workers: 101–105 on GPU `0`, 106–110 on GPU `1`, and 111–115 on GPU `2`. Each worker has a disjoint set of 16 logical CPU threads, keeping the two SMT threads of each of its eight physical cores together. Workers use CPUs `0–119,128–247`; the orchestrator uses the remaining `120–127,248–255`. The private initializer creates SSH identities and state for all fifteen workers. These CPU numbers are specific to Athena's topology.
-
-Re-run [Create.sql](../src/Orchestrator/SQL/Create.sql) as the database administrator before enabling the expanded deployment; it registers any missing workers in the 101–115 range. Existing registrations and statuses are preserved. Sign in to Codex on each newly deployed worker and refresh the desktop SSH host keys. Other worker-count changes must likewise update Compose services, the initializer's worker-ID range, database registrations and desktop SSH aliases.
+[Create.sql](../src/Orchestrator/SQL/Create.sql) registers the six workers for new installations and preserves existing registrations. Before retiring workers 107–115 from an existing fleet, let their active jobs finish and check for saved work and files awaiting cleanup. Keep workers with remaining work available until it is transferred or cleaned up, then pause them before taking their services offline.
 
 Compose creates the SSH identities, worker Git configuration, and persistent directories under `data/`. Checkouts, Codex state, and SSH identities survive container restarts. Back up `data/` and the PostgreSQL database when moving the deployment.
 
@@ -293,7 +295,7 @@ The repository's `server/` directory contains the deployment files. Copy its con
   data/                     Persistent state, created by Compose
 ```
 
-For a new installation, copy `server/compose.yaml` to `server/compose.private.yaml` and configure `x-settings` with both published image references, database connection, GitHub token, Git name/email and desktop SSH public key. Keep the configured copy private, and write literal dollar signs as `$$` in Compose values. For an existing installation, preserve its credentials, enabled flags, worker services, GPU assignments and `data/` directory; the nine-worker template does not need to replace your configured layout.
+For a new installation, copy `server/compose.yaml` to `server/compose.private.yaml` and configure `x-settings` with both published image references, database connection, GitHub token, Git name/email and desktop SSH public key. Keep the configured copy private, and write literal dollar signs as `$$` in Compose values. For an existing installation, preserve its credentials, enabled flags, worker services, GPU assignments and `data/` directory; configure host-specific CPU sets and GPU assignments in the private copy.
 
 Copy the configured files and connect to the server:
 
@@ -316,7 +318,7 @@ Compose pulls the published orchestrator and worker images; it performs no build
 
 In the template, worker execution and publication start disabled. Complete the client SSH setup below and sign in to Codex on each worker before enabling them.
 
-The API listens on `127.0.0.1:18080`, and worker SSH ports listen on `127.0.0.1:22101`–`22109` in the template, through `22115` in Athena's private configuration. `docker compose logs --tail=100` shows startup output; `docker compose down` stops the deployment.
+The API listens on `127.0.0.1:18080`, and worker SSH ports listen on `127.0.0.1:22101`–`22106` in the template. `docker compose logs --tail=100` shows startup output; `docker compose down` stops the deployment.
 
 ### Client
 
@@ -360,7 +362,7 @@ chmod 600 ~/.ssh/cpr-worker-known_hosts
 Compare the keys with `ssh-keygen -lf ~/cpr/data/keys/cpr-worker-known_hosts` on the server. Add these blocks to `~/.ssh/config`, keeping the existing server configuration. Use the `athena` server alias and set `IdentityFile` to the private key matching `desktop-public-key` in Compose:
 
 ```sshconfig
-Host cpr-101 cpr-102 cpr-103 cpr-104 cpr-105 cpr-106 cpr-107 cpr-108 cpr-109 cpr-110 cpr-111 cpr-112 cpr-113 cpr-114 cpr-115
+Host cpr-101 cpr-102 cpr-103 cpr-104 cpr-105 cpr-106
     HostName 127.0.0.1
     User coder
     ProxyJump athena
@@ -387,33 +389,6 @@ Host cpr-105
 Host cpr-106
     Port 22106
     HostKeyAlias cpr-106
-Host cpr-107
-    Port 22107
-    HostKeyAlias cpr-107
-Host cpr-108
-    Port 22108
-    HostKeyAlias cpr-108
-Host cpr-109
-    Port 22109
-    HostKeyAlias cpr-109
-Host cpr-110
-    Port 22110
-    HostKeyAlias cpr-110
-Host cpr-111
-    Port 22111
-    HostKeyAlias cpr-111
-Host cpr-112
-    Port 22112
-    HostKeyAlias cpr-112
-Host cpr-113
-    Port 22113
-    HostKeyAlias cpr-113
-Host cpr-114
-    Port 22114
-    HostKeyAlias cpr-114
-Host cpr-115
-    Port 22115
-    HostKeyAlias cpr-115
 ```
 
 Sign in with your ChatGPT account on each worker, using its SSH alias:
@@ -422,7 +397,7 @@ Sign in with your ChatGPT account on each worker, using its SSH alias:
 ssh -t cpr-101 codex login --device-auth
 ```
 
-Repeat for every deployed worker, through `cpr-115` on Athena. Codex credentials persist in each worker's state directory.
+Repeat for every deployed worker, through `cpr-106` on Athena. Codex credentials persist in each worker's state directory.
 
 After signing in to Codex on the workers, set `run-workers` and `publish-approved` to `'true'` in the server's `compose.yaml` and run `docker compose up -d` again. Publication still requires `cpr approve ID`.
 

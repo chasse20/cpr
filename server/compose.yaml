@@ -85,7 +85,7 @@ services:
         cat /tmp/desktop.pub /data/orchestrator-ssh/id_ed25519.pub > /data/keys/authorized_keys
         : > /data/orchestrator-ssh/config
         : > /data/orchestrator-ssh/known_hosts
-        for id in {101..109}; do
+        for id in {101..106}; do
           workspace="/data/workspaces/$$id"
           state="/data/state/$$id"
           mkdir -p "$$workspace/jobs" "$$workspace/archive" "$$state/home/coder/.codex" \
@@ -200,7 +200,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['0']
+              device_ids: ['1']
               capabilities: [gpu]
 
   w104:
@@ -230,7 +230,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['1']
+              device_ids: ['2']
               capabilities: [gpu]
 
   w106:
@@ -240,51 +240,6 @@ services:
       - ./data/state/106:/state
       - ./data/keys:/etc/cpr/keys:ro
     ports: ['127.0.0.1:22106:22']
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['1']
-              capabilities: [gpu]
-
-  w107:
-    <<: *worker
-    volumes:
-      - ./data/workspaces/107:/workspace
-      - ./data/state/107:/state
-      - ./data/keys:/etc/cpr/keys:ro
-    ports: ['127.0.0.1:22107:22']
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['2']
-              capabilities: [gpu]
-
-  w108:
-    <<: *worker
-    volumes:
-      - ./data/workspaces/108:/workspace
-      - ./data/state/108:/state
-      - ./data/keys:/etc/cpr/keys:ro
-    ports: ['127.0.0.1:22108:22']
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['2']
-              capabilities: [gpu]
-
-  w109:
-    <<: *worker
-    volumes:
-      - ./data/workspaces/109:/workspace
-      - ./data/state/109:/state
-      - ./data/keys:/etc/cpr/keys:ro
-    ports: ['127.0.0.1:22109:22']
     deploy:
       resources:
         reservations:

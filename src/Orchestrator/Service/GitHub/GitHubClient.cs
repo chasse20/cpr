@@ -151,7 +151,7 @@ namespace CPR.Service.GitHub
 
 		private static bool IsActionableFeedback( string tKind, string tBody )
 		{
-			if ( Regex.IsMatch( tBody, @"✅\s+Addressed in commit [a-f0-9]+\s*\z", RegexOptions.IgnoreCase ) )
+			if ( Regex.IsMatch( tBody, @"✅\s+Addressed in commit(?: [a-f0-9]+|s [a-f0-9]+ to [a-f0-9]+)\s*\z", RegexOptions.IgnoreCase ) )
 			{
 				return false;
 			}

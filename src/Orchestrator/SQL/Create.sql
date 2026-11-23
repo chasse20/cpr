@@ -115,16 +115,7 @@ VALUES
 	( 103, 'cpr-103', 1 ),
 	( 104, 'cpr-104', 1 ),
 	( 105, 'cpr-105', 1 ),
-	( 106, 'cpr-106', 1 ),
-	( 107, 'cpr-107', 1 ),
-	( 108, 'cpr-108', 1 ),
-	( 109, 'cpr-109', 1 ),
-	( 110, 'cpr-110', 1 ),
-	( 111, 'cpr-111', 1 ),
-	( 112, 'cpr-112', 1 ),
-	( 113, 'cpr-113', 1 ),
-	( 114, 'cpr-114', 1 ),
-	( 115, 'cpr-115', 1 )
+	( 106, 'cpr-106', 1 )
 ON CONFLICT ( "WorkerId" ) DO NOTHING;
 
 -- Runtime access; schema and table ownership stay with the administrator

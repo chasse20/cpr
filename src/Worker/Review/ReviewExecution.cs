@@ -93,11 +93,13 @@ namespace CPR.Worker.Review
 				{
 					Storage.Evidence( Artifacts, tempArtifact );
 				}
-				if ( IsFinal )
+				bool tempIsHandoff = ReportValidator.IsHandoff( tempResult, IsFinal );
+
+				if ( IsFinal || tempIsHandoff )
 				{
 					ScopeAudit tempAudit = Storage.Read<ScopeAudit>( Storage.Evidence( Artifacts, tempResult.ScopeAudit ), true );
 					ReviewScope tempScope = Storage.Read<ReviewScope>( Path.Combine( Attempt, "output-scope.json" ), true );
-					ReportValidator.ValidateScope( tempAudit, tempScope, tempResult );
+					ReportValidator.ValidateScope( tempAudit, tempScope, tempResult, tempIsHandoff );
 					CommandResult tempDiff = await Workspace.GitResultAsync( [ "diff", "--check", Head, OutputTree ], tCancel );
 					WorkerFailure.Require( tempDiff.IsSuccess, "Resolve conflict markers and whitespace errors: " + tempDiff.Output, "integration" );
 				}
