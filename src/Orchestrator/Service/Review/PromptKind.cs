@@ -10,7 +10,6 @@ namespace CPR.Service.Review
 		FinalValidation,
 		Relevance,
 		TweakSummary,
-		ReportRepair,
 		ReportRecovery,
 		SavedValidation,
 		MergeRepair,

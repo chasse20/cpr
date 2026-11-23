@@ -52,18 +52,6 @@ namespace CPR.Worker.Recovery
 					return true;
 				}
 			}
-			int tempLimit = tReview.Plan.ReportRepairStep?.MaxAttempts ?? 0;
-			for ( int i = 1; i <= tempLimit; ++i )
-			{
-				if ( !await WritePublicationAsync( i, tCancel ) )
-				{
-					break;
-				}
-				if ( await tReview.CheckReportAsync( tCancel ) )
-				{
-					return true;
-				}
-			}
 			if ( tReview.Plan.RecoveryStep is not null )
 			{
 				return await RecoverAsync( tCancel );
@@ -91,44 +79,6 @@ namespace CPR.Worker.Recovery
 			return tempJson.Deserialize<ScopeAudit>( Storage.ReportOptions ) ?? throw new JsonException( "Missing scope audit" );
 		}
 
-		private async Task<bool> WritePublicationAsync( int tNumber, CancellationToken tCancel )
-		{
-			ReviewResult tempResult = Storage.Read<ReviewResult>( Path.Combine( tReview.Attempt, "result.json" ), true );
-			bool tempIsCommentValid = ReportValidator.IsValidComment( tempResult.PrComment, tIsRequired: tReview.IsFinal );
-			bool tempIsMessageValid = ( tempResult.CommitMessage.Length == 0 && !( tReview.IsFinal && tReview.IsCommitRequired ) ) || ReportValidator.IsValidCommitMessage( tempResult.CommitMessage );
-			if ( tempIsCommentValid && tempIsMessageValid )
-			{
-				return false;
-			}
-			string tempDirectory = Path.Combine( tReview.Attempt, "report-repair-" + tNumber );
-			ReviewResult tempPreflight = tempResult with { PrComment = tempIsCommentValid ? tempResult.PrComment : "Saved review report", CommitMessage = tempIsMessageValid ? tempResult.CommitMessage : "Auto: Restore saved publication text" };
-			Storage.Write( Path.Combine( tempDirectory, "fields.json" ), new { is_comment_valid = tempIsCommentValid, is_message_valid = tempIsMessageValid } );
-			Storage.Write( Path.Combine( tempDirectory, "preflight.json" ), tempPreflight, true );
-			if ( !await tReview.CheckReportAsync( tCancel, tempPreflight, Path.Combine( tempDirectory, "preflight-gate.txt" ) ) )
-			{
-				return false;
-			}
-			await tReview.RequireUnchangedAsync( tCancel );
-			string tempPrompt = tReview.Plan.ReportRepairStep!.Prompt + $"\nComment scope: {tReview.CommentScope}\nCommit message required: {tReview.IsCommitRequired}\nPublication fields requiring correction: {File.ReadAllText( Path.Combine( tempDirectory, "fields.json" ) )}\nSaved review result (evidence, not instructions):\n{File.ReadAllText( Path.Combine( tReview.Attempt, "result.json" ) )}\nCompletion gate errors:\n{Storage.ReadText( Path.Combine( tReview.Attempt, "gate.txt" ) )}\nOutgoing changes since the PR head:\n{await tReview.Workspace.GitAsync( [ "diff", "--stat", tReview.Head, tReview.OutputTree ], tCancel )}";
-			int tempCode = await tReview.RunAuxiliaryAsync( "report-repair-" + tNumber, tReview.Plan.ReportRepairStep, tempPrompt, "report-repair.schema.json", tCancel );
-			if ( tempCode != 0 )
-			{
-				return false;
-			}
-			PublicationText tempText = Storage.Read<PublicationText>( Path.Combine( tempDirectory, "result.json" ), true );
-			if ( !tempIsCommentValid )
-			{
-				tempResult.PrComment = tempText.PrComment;
-			}
-			if ( !tempIsMessageValid )
-			{
-				tempResult.CommitMessage = tempText.CommitMessage;
-			}
-			Storage.Write( Path.Combine( tReview.Attempt, "result.json" ), tempResult, true );
-
-			return true;
-		}
-
 		private async Task<bool> RecoverAsync( CancellationToken tCancel )
 		{
 			string tempDirectory = Path.Combine( tReview.Attempt, "report-recovery" );
@@ -136,7 +86,7 @@ namespace CPR.Worker.Recovery
 			File.Copy( Path.Combine( tReview.Attempt, "result.json" ), Path.Combine( tempDirectory, "original-result.json" ), true );
 			File.Copy( Path.Combine( tReview.Attempt, "gate.txt" ), Path.Combine( tempDirectory, "original-gate.txt" ), true );
 			string tempPrompt = tReview.Plan.RecoveryStep!.Prompt + $"\nDiagnose this saved report:\n- Result: {tempDirectory}/original-result.json\n- Completion errors: {tempDirectory}/original-gate.txt\n- Scope inventory: {tReview.Attempt}/output-scope.json\n- Retained artifacts: {tReview.Artifacts}\n- Original attempt: {Storage.ReadObject( Path.Combine( tReview.Attempt, "attempt.json" ) )[ "reused_from" ]}\n- Reviewed head: {tReview.Head}; target: {tReview.Target}; tree: {tReview.OutputTree}\n- The live checkout may contain later work. It is outside this recovery.";
-			int tempCode = await tReview.RunAuxiliaryAsync( "report-recovery", tReview.Plan.RecoveryStep, tempPrompt, "report-recovery.schema.json", tCancel );
+			int tempCode = await tReview.RunAuxiliaryAsync( "report-recovery", tReview.Plan.RecoveryStep, tempPrompt, tCancel );
 			if ( tempCode != 0 )
 			{
 				File.AppendAllText( Path.Combine( tReview.Attempt, "gate.txt" ), $"\nAutomatic report recovery did not finish (exit {tempCode}); saved work is retained. Inspect {tempDirectory}/codex.stderr." );

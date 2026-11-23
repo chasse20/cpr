@@ -93,7 +93,7 @@ namespace CPR.Worker.Recovery
 			string tempDirectory = Path.Combine( tReview.Attempt, "saved-validation" );
 			await tReview.Workspace.WriteGitAsync( Path.Combine( tempDirectory, "reviewed.patch" ), [ "diff", "--binary", tReview.Head, tReview.OutputTree ], tCancel );
 			string tempPrompt = tReview.Plan.SavedValidationStep.Prompt + $"\nSaved evidence to validate:\n- Review result: {tReview.Attempt}/result.json\n- Required scope: {tReview.Attempt}/output-scope.json\n- Scope audit and check artifacts: {tReview.Artifacts}\n- Reviewed diff: {tempDirectory}/reviewed.patch\n- Original PR head: {tReview.Head}; original target: {tReview.Target}; reviewed tree: {tReview.OutputTree}\n- The configured final validation stage never started because the completed review's report failed a structural gate. All final report, scope, artifact, and diff gates now pass.\n- The live checkout may contain newer manual edits. Those are outside this validation; do not evaluate or alter them.";
-			int tempCode = await tReview.RunAuxiliaryAsync( "saved-validation", tReview.Plan.SavedValidationStep, tempPrompt, "saved-validation.schema.json", tCancel );
+			int tempCode = await tReview.RunAuxiliaryAsync( "saved-validation", tReview.Plan.SavedValidationStep, tempPrompt, tCancel );
 			if ( tempCode != 0 )
 			{
 				File.AppendAllText( Path.Combine( tReview.Attempt, "gate.txt" ), "\nSaved-evidence validation did not complete; no full review was started" );

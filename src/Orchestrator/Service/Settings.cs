@@ -19,7 +19,6 @@ namespace CPR.Service
 		public string GitAuthorEmail { get; set; } = "";
 		public string GitStoragePath { get; set; } = "/data/git";
 		public Dictionary<PromptKind, string> Prompts { get; set; } = [];
-		public ReviewStepSettings ReportRepairStep { get; set; } = new() { Name = "report-repair", Model = "gpt-6.2-sol", ReasoningEffort = "high", MaxAttempts = 1, Prompts = [ PromptKind.ReportRepair ] };
 		public ReviewStepSettings RecoveryStep { get; set; } = new() { Name = "report-recovery", Model = "gpt-6.2-astra", ReasoningEffort = "low", MaxAttempts = 1, Prompts = [ PromptKind.ReportRecovery ] };
 		public ReviewStepSettings MergeRepairStep { get; set; } = new() { Name = "merge-repair", Model = "gpt-6.2-sol", ReasoningEffort = "high", MaxAttempts = 1, Prompts = [ PromptKind.MergeRepair, PromptKind.Correctness ] };
 		public ReviewStepSettings[] ReviewSteps { get; set; } = [];

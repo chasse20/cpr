@@ -233,8 +233,6 @@ namespace CPR.Service.Review
 				tempContext = await tGitHub.ReadReviewContextAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tIsFocused: tempIsFocusedRepair, tCancel );
 			}
 
-			ReviewStepSettings tempRepairSettings = tSettings.Value.ReportRepairStep;
-			ReviewStep? tempReportRepair = tempRepairSettings.IsEnabled ? new( tempRepairSettings.Name, tempRepairSettings.Model, tempRepairSettings.ReasoningEffort, tempRepairSettings.MaxAttempts, PromptRenderer.Render( tempPrompts[ PromptKind.ReportRepair ], tRequest ) ) : null;
 			ReviewStepSettings tempRecoverySettings = tSettings.Value.RecoveryStep;
 			ReviewStep? tempRecovery = tempRecoverySettings.IsEnabled ? new( tempRecoverySettings.Name, tempRecoverySettings.Model, tempRecoverySettings.ReasoningEffort, 1, PromptRenderer.Render( tempPrompts[ PromptKind.ReportRecovery ], tRequest ) ) : null;
 			ReviewStepSettings tempValidation = tSettings.Value.ReviewSteps.Last( x => x.IsEnabled );
@@ -249,7 +247,6 @@ namespace CPR.Service.Review
 				MaintainerResolution: tRequest.MaintainerResolution,
 				PublishedSha: tRequest.PublishedSha,
 				IsReportRetry: tempIsReportRetry,
-				ReportRepairStep: tempReportRepair,
 				IsMergeRepair: tempIsMergeRepair,
 				PriorReview: tempPriorReview,
 				IsHistoricalReport: tIsHistoricalReport,
@@ -306,7 +303,6 @@ namespace CPR.Service.Review
 				throw new InvalidOperationException( "CodeRabbit requires bounded polling, settling delays, and one focused repair with feedback and evidence prompts" );
 			}
 
-			ValidateStep( tSettings.ReportRepairStep, [ PromptKind.ReportRepair ] );
 			ValidateStep( tSettings.RecoveryStep, [ PromptKind.ReportRecovery ] );
 
 			if ( tSettings.RecoveryStep.MaxAttempts != 1 )

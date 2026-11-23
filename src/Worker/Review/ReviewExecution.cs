@@ -82,12 +82,12 @@ namespace CPR.Worker.Review
 			WorkerFailure.Require( await Workspace.GitAsync( [ "rev-parse", "HEAD" ], tCancel ) == WorkspaceHead && await Workspace.FingerprintAsync( tCancel ) == ( WorkspaceTree ?? OutputTree ), "Workspace changed after validation; preserving saved work" );
 		}
 
-		public async Task<bool> CheckReportAsync( CancellationToken tCancel, ReviewResult? tCandidate = null, string? tGate = null )
+		public async Task<bool> CheckReportAsync( CancellationToken tCancel, string? tGate = null )
 		{
 			List<string> tempErrors = [];
 			try
 			{
-				ReviewResult tempResult = tCandidate ?? Storage.Read<ReviewResult>( Path.Combine( Attempt, "result.json" ), true );
+				ReviewResult tempResult = Storage.Read<ReviewResult>( Path.Combine( Attempt, "result.json" ), true );
 				tempErrors.AddRange( ReportValidator.Validate( tempResult, IsFinal, IsCommitRequired, Plan.ApprovedTreeSha is not null ) );
 				foreach ( string tempArtifact in tempResult.Checks.Select( x => x.Artifact ).Append( tempResult.ScopeAudit ).Where( x => x.Length > 0 ) )
 				{
@@ -118,27 +118,16 @@ namespace CPR.Worker.Review
 			return tempErrors.Count == 0;
 		}
 
-		public async Task<int> RunAuxiliaryAsync( string tName, ReviewStep tStep, string tPrompt, string tSchema, CancellationToken tCancel )
+		public async Task<int> RunAuxiliaryAsync( string tName, ReviewStep tStep, string tPrompt, CancellationToken tCancel )
 		{
 			string tempDirectory = Path.Combine( Attempt, tName );
-			string tempKey = tName.StartsWith( "report-repair-", StringComparison.Ordinal ) ? "report_repairs" : tName.Replace( '-', '_' );
+			string tempKey = tName.Replace( '-', '_' );
 			JsonObject tempMetadata = new() { [ "model" ] = tStep.Model, [ "reasoning_effort" ] = tStep.ReasoningEffort, [ "started_at" ] = DateTimeOffset.UtcNow, [ "status" ] = "running" };
-			Storage.Update( Path.Combine( Attempt, "attempt.json" ), x =>
-			{
-				if ( tempKey == "report_repairs" )
-				{
-					x[ tempKey ] ??= new JsonArray();
-					x[ tempKey ]!.AsArray().Add( tempMetadata.DeepClone() );
-				}
-				else
-				{
-					x[ tempKey ] = tempMetadata.DeepClone();
-				}
-			} );
+			Storage.Update( Path.Combine( Attempt, "attempt.json" ), x => x[ tempKey ] = tempMetadata );
 			int tempCode = 143;
 			try
 			{
-				tempCode = await Model.RunAsync( tStep, tempDirectory, tempDirectory, tPrompt, ModelRunner.Schema( Run, tSchema ), false, null, null, tCancel );
+				tempCode = await Model.RunAsync( tStep, tempDirectory, tempDirectory, tPrompt, ModelRunner.Schema( Run, tName + ".schema.json" ), false, null, null, tCancel );
 				await RequireUnchangedAsync( tCancel );
 
 				return tempCode;
@@ -147,7 +136,7 @@ namespace CPR.Worker.Review
 			{
 				Storage.Update( Path.Combine( Attempt, "attempt.json" ), x =>
 				{
-					JsonNode tempRecord = tempKey == "report_repairs" ? x[ tempKey ]!.AsArray().Last()! : x[ tempKey ]!;
+					JsonNode tempRecord = x[ tempKey ]!;
 					tempRecord[ "completed_at" ] = DateTimeOffset.UtcNow;
 					tempRecord[ "exit_code" ] = tempCode;
 					tempRecord[ "status" ] = tempCode == 0 ? "executed" : "failed";
