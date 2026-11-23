@@ -17,6 +17,7 @@ namespace CPR.Worker.Review
 				CPR execution facts:
 				- Comment scope: {tReview.CommentScope}. Focused repairs describe only this pass and its checks; CPR combines their summaries with the saved full report when needed. Other commit_summary runs cover the outgoing delta from {tReview.Head} to the final working tree. Publication format does not expand the internal review scope.
 				- Assigned step: {tStep.Name}; final step: {tReview.IsFinal}; approved integration entry tree: {tReview.Plan.ApprovedTreeSha}
+				- Rereview: {tReview.Plan.IsRereview}
 				- PR: {tReview.Workspace.Url}; target branch: {tReview.Workspace.Request.TargetBranch}; checkout: {tReview.Workspace.Root}
 				- Original head: {tReview.Head}; current target: {tReview.Target}; comparison base: {tReview.Comparison}; integrated target: {tReview.Integration}
 				- Read {tReview.Artifacts}/review-scope.json for the inventory. {tempScope} Inspect complete affected functions and necessary callers, and update scope_audit for newly repaired paths.

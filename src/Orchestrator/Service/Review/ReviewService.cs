@@ -179,21 +179,16 @@ namespace CPR.Service.Review
 				tempSettings = [ tSettings.Value.MergeRepairStep ];
 			}
 
-			PromptKind tempOperation = tRequest.WorkReason switch
-			{
-				PullRequestWorkReason.MergeConflict => PromptKind.MergeConflict,
-				PullRequestWorkReason.Rereview => PromptKind.Rereview,
-				_ => PromptKind.InitialReview
-			};
+			bool tempIsFocusedRepair = tempIsMergeRepair || tempIsFeedbackRepair;
 			List<ReviewStep> tempSteps = [];
 			int tempCount = tempSettings.Length;
 
 			for ( int i = 0; i < tempCount; ++i )
 			{
 				ReviewStepSettings tempStep = tempSettings[ i ];
-				IEnumerable<PromptKind> tempKinds = tempIsMergeRepair || tempIsFeedbackRepair ? tempStep.Prompts : [ PromptKind.SharedReview, PromptKind.Relevance, tempOperation, .. tempStep.Prompts, PromptKind.Evidence ];
+				IEnumerable<PromptKind> tempKinds = tempIsFocusedRepair ? tempStep.Prompts : [ PromptKind.Review, PromptKind.Relevance, .. tempStep.Prompts, PromptKind.Evidence ];
 
-				if ( !tempIsMergeRepair && !tempIsFeedbackRepair && i == tempCount - 1 )
+				if ( !tempIsFocusedRepair && i == tempCount - 1 )
 				{
 					tempKinds = tempKinds.Concat( [ PromptKind.Correctness, PromptKind.Resources, PromptKind.Cleanup, PromptKind.FinalValidation ] );
 				}
@@ -235,7 +230,7 @@ namespace CPR.Service.Review
 			}
 			else
 			{
-				tempContext = await tGitHub.ReadReviewContextAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tIsFocused: tempIsMergeRepair || tempIsFeedbackRepair, tCancel );
+				tempContext = await tGitHub.ReadReviewContextAsync( $"https://github.com/{tRequest.Repository}/pull/{tRequest.Number}", tIsFocused: tempIsFocusedRepair, tCancel );
 			}
 
 			ReviewStepSettings tempRepairSettings = tSettings.Value.ReportRepairStep;

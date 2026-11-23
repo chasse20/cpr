@@ -2,16 +2,13 @@ namespace CPR.Service.Review
 {
 	public enum PromptKind
 	{
-		InitialReview,
-		MergeConflict,
-		SharedReview,
+		Review,
 		Correctness,
 		Resources,
 		Cleanup,
 		Evidence,
 		FinalValidation,
 		Relevance,
-		Rereview,
 		TweakSummary,
 		ReportRepair,
 		ReportRecovery,
