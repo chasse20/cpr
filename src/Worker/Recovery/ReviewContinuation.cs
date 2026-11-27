@@ -58,6 +58,10 @@ namespace CPR.Worker.Recovery
 				ReviewPlan tempPlan = Storage.Read<ReviewPlan>( Path.Combine( tempSource, "plan.json" ) );
 				RequireCompatible( tempManifest, tempPlan );
 				WorkerFailure.Require( tempManifest[ "target_sha" ]?.GetValue<string>() == tReview.Target, "Saved stages belong to a different target revision; use review to reassess the integrated changes" );
+				if ( tempManifest[ "kind" ]?.GetValue<string>() == "head_reassessment" )
+				{
+					await HeadReassessment.RestoreAsync( tReview, tempSource, tempManifest, tCancel );
+				}
 				if ( tReview.IsMergeRepair || tReview.IsFeedbackRepair )
 				{
 					tReview.ScopeBase = tempManifest[ "scope_base_tree" ]!.GetValue<string>();
@@ -79,7 +83,7 @@ namespace CPR.Worker.Recovery
 				}
 				string[] tempAttempts = [ .. Directory.EnumerateDirectories( tempSource ).Where( x => File.Exists( Path.Combine( x, "attempt.json" ) ) ).Order( StringComparer.Ordinal ) ];
 				string? tempCompleted;
-				while ( tempResume < tReview.Plan.Steps.Length - 1 && ( tempCompleted = Array.Find( tempAttempts, x => IsCompleted( x, tReview.Plan.Steps[ tempResume ].Name ) ) ) is not null )
+				while ( tempResume < tReview.Steps.Length - 1 && ( tempCompleted = Array.Find( tempAttempts, x => IsCompleted( x, tReview.Steps[ tempResume ].Name ) ) ) is not null )
 				{
 					tReview.Attempt = Path.Combine( tReview.Run, Path.GetFileName( tempCompleted ) );
 					++tempResume;
@@ -136,7 +140,19 @@ namespace CPR.Worker.Recovery
 
 		private void RequireCompatible( JsonObject tManifest, ReviewPlan tPlan )
 		{
-			WorkerFailure.Require( tManifest[ "head_sha" ]?.GetValue<string>() == tReview.Head && tPlan.HeadSha == tReview.Head && tPlan.Context.GetProperty( "PullRequest" ).GetProperty( "base" ).GetProperty( "ref" ).GetString() == tReview.Workspace.Request.TargetBranch && tPlan.MaintainerResolution == tReview.Plan.MaintainerResolution && tPlan.PublishedSha == tReview.Plan.PublishedSha && tPlan.IsMergeRepair == tReview.Plan.IsMergeRepair && tPlan.IsFeedbackRepair == tReview.Plan.IsFeedbackRepair && tPlan.ApprovedTreeSha == tReview.Plan.ApprovedTreeSha && tPlan.IsRereview == tReview.Plan.IsRereview && tPlan.Steps.SequenceEqual( tReview.Plan.Steps ) && tPlan.Feedback.SequenceEqual( tReview.Plan.Feedback ), "Saved stages belong to different revisions, decisions, or review settings; use review to reassess or connect to reconcile integration" );
+			ReviewStep[] tempCurrent = tReview.Plan.Steps;
+			ReviewStep[] tempPrior = tPlan.Steps;
+			bool tempIsHeadReassessment = tManifest[ "kind" ]?.GetValue<string>() == "head_reassessment";
+			if ( tempIsHeadReassessment )
+			{
+				WorkerFailure.Require( tReview.Plan.HeadReassessmentStep is not null && tPlan.HeadReassessmentStep is not null && tReview.Plan.PriorReview == tPlan.PriorReview, "Saved head reassessment no longer matches its prior review; request a fresh review" );
+				tempCurrent = [ tReview.Plan.HeadReassessmentStep! ];
+				tempPrior = [ tPlan.HeadReassessmentStep! ];
+			}
+
+			// Final stages are replayed, so only their reasoning effort may change
+			bool tempIsSameSettings = tempPrior.Length > 0 && tempCurrent.Length == tempPrior.Length && tempCurrent.SkipLast( 1 ).SequenceEqual( tempPrior.SkipLast( 1 ) ) && tempCurrent[ ^1 ] == tempPrior[ ^1 ] with { ReasoningEffort = tempCurrent[ ^1 ].ReasoningEffort };
+			WorkerFailure.Require( tManifest[ "head_sha" ]?.GetValue<string>() == tReview.Head && tPlan.HeadSha == tReview.Head && tPlan.Context.GetProperty( "PullRequest" ).GetProperty( "base" ).GetProperty( "ref" ).GetString() == tReview.Workspace.Request.TargetBranch && tPlan.MaintainerResolution == tReview.Plan.MaintainerResolution && tPlan.PublishedSha == tReview.Plan.PublishedSha && tPlan.IsMergeRepair == tReview.Plan.IsMergeRepair && tPlan.IsFeedbackRepair == tReview.Plan.IsFeedbackRepair && tPlan.ApprovedTreeSha == tReview.Plan.ApprovedTreeSha && tPlan.IsRereview == tReview.Plan.IsRereview && tempIsSameSettings && tPlan.Feedback.SequenceEqual( tReview.Plan.Feedback ), "Saved stages belong to different revisions, decisions, or review settings; use review to reassess or connect to reconcile integration" );
 		}
 
 		public static bool IsCompleted( string tDirectory, string tStep )

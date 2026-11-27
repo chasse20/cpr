@@ -42,7 +42,26 @@ namespace CPR.Worker.Recovery
 				return new( "failed", tempManifest[ "failure" ]?[ "category" ]?.GetValue<string>() ?? "infrastructure", tempManifest[ "failure" ]?[ "action" ]?.GetValue<string>() ?? "Worker stopped without a recoverable classification; inspect its retained run", null );
 			}
 
-			return new( "idle", "interrupted", "Worker is idle; resuming interrupted review work", null );
+			string? tempHead = tempManifest[ "head_sha" ]?.GetValue<string>();
+			string? tempTarget = tempManifest[ "target_sha" ]?.GetValue<string>();
+			if ( tempRun != Storage.ReadText( Path.Combine( tWorkspace.Job, "review-checkpoint" ) ) || tempHead is null || tempTarget is null )
+			{
+				return new( "idle", "transient", "Worker stopped before a review checkpoint was established", null );
+			}
+
+			Workspace.RequireSha( tempHead );
+			Workspace.RequireSha( tempTarget );
+			if ( !Directory.Exists( tWorkspace.Stored ) || Storage.ReadText( Path.Combine( tWorkspace.Job, "target-branch" ) ) != tWorkspace.Request.TargetBranch || Storage.ReadText( Path.Combine( tWorkspace.Job, "target-sha" ) ) != tempTarget || !( await tWorkspace.GitResultAsync( [ "merge-base", "--is-ancestor", tempHead, "HEAD" ], tCancel, tWorkspace.Stored ) ).IsSuccess )
+			{
+				return new( "failed", "snapshot", "Interrupted review no longer matches the saved workspace; use connect to reconcile it", null );
+			}
+
+			string tempMerge = Storage.ReadText( Path.Combine( tWorkspace.Stored, ".git/MERGE_HEAD" ) );
+			bool tempIsIntegrated = tempMerge == tempTarget || ( tempMerge.Length == 0 && ( await tWorkspace.GitResultAsync( [ "merge-base", "--is-ancestor", tempTarget, "HEAD" ], tCancel, tWorkspace.Stored ) ).IsSuccess );
+
+			return tempIsIntegrated
+				? new( "idle", "interrupted", "Verified saved checkpoint; resuming interrupted review work", null, tempHead )
+				: new( "failed", "snapshot", "Interrupted review no longer has its recorded target integration; use connect to reconcile it", null );
 		}
 	}
 }

@@ -20,8 +20,8 @@ Usage: cpr COMMAND
   remove ID         Stop tracking; preserve saved work and database history
   purge ID          Stop tracking and delete all PR files, including edits
   cancel ID         Stop a review; preserve edits and release its worker
-  review ID [--resolution TEXT]
-                    Rereview, optionally recording a maintainer decision
+  review ID [--full | --resolution TEXT]
+                    Reassess changes or request a full rereview
   continue ID       Continue unfinished review work with a fresh bounded allowance
   retry ID          Repair a saved final report without rerunning review or tests
   checkout ID       Copy the saved PR checkout locally
@@ -45,8 +45,10 @@ case "$command_name" in
   add)
     (($# == 1)) || fail 'Usage: cpr add URL (one PR at a time)' ;;
   review)
-    (($# == 1 || $# == 3)) || fail 'Usage: cpr review ID [--resolution TEXT]'
-    if (($# == 3)); then [[ $2 == --resolution ]] || fail 'Usage: cpr review ID [--resolution TEXT]'; fi ;;
+    case $#:${2:-} in
+      1:|2:--full|3:--resolution) ;;
+      *) fail 'Usage: cpr review ID [--full | --resolution TEXT]' ;;
+    esac ;;
   show)
     (($# == 1 || $# == 2)) || fail 'Usage: cpr show ID [--comment]'
     if (($# == 2)); then [[ $2 == --comment ]] || fail 'Usage: cpr show ID [--comment]'; fi ;;
@@ -212,6 +214,8 @@ case "$command_name" in
       current=$(request GET "/api/pr/$1")
       jq -e 'has("maintainerResolution")' <<< "$current" >/dev/null || fail 'Server does not support maintainer resolutions; update the CPR schema and orchestrator first.'
       payload=$(jq -cn --arg resolution "$3" '{resolution: $resolution}')
+    elif (($# == 2)); then
+      payload='{"isFull":true}'
     fi
     result=$(request POST "/api/pr/$1/review" "$payload")
     jq -r '.message' <<< "$result" ;;

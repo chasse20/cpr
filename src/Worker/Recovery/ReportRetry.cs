@@ -13,22 +13,24 @@ namespace CPR.Worker.Recovery
 			string tempSource = tReview.SourceRun( Storage.ReadObject( tReview.Manifest )[ "report_source_run" ]!.GetValue<string>() );
 			JsonObject tempManifest = Storage.ReadObject( Path.Combine( tempSource, "manifest.json" ) );
 			ReviewPlan tempPlan = Storage.Read<ReviewPlan>( Path.Combine( tempSource, "plan.json" ) );
+			string? tempKind = tempManifest[ "kind" ]?.GetValue<string>();
+			ReviewStep[] tempSteps = tempKind == "head_reassessment" && tempPlan.HeadReassessmentStep is ReviewStep tempFocused ? [ tempFocused ] : tempPlan.Steps;
 			WorkerFailure.Require( tempManifest[ "status" ]?.GetValue<string>() == "failed" && tempManifest[ "exit_code" ]?.GetValue<int>() == 13 && tempManifest[ "kind" ]?.GetValue<string>() != "manual_tweak" && tempManifest[ "head_sha" ]?.GetValue<string>() == tReview.Head && tempManifest[ "target_sha" ]?.GetValue<string>() == tReview.Target && tempPlan.PublishedSha == tReview.Plan.PublishedSha && tempPlan.MaintainerResolution == tReview.Plan.MaintainerResolution, "Report recovery requires a failed completed review report with unchanged source, destination, publication, and maintainer decisions" );
 			string tempAttempt = tempManifest[ "current_attempt" ]!.GetValue<string>();
 			Storage.RequireCanonical( tempAttempt );
 			Match tempMatch = Regex.Match( Path.GetFileName( tempAttempt ), @"^([0-9]+)-([a-z][a-z0-9-]*)-[1-9][0-9]*$" );
 			WorkerFailure.Require( Path.GetDirectoryName( tempAttempt ) == tempSource && tempMatch.Success, "No canonical completed review attempt is available" );
 			int tempIndex = int.Parse( tempMatch.Groups[ 1 ].Value, CultureInfo.InvariantCulture );
-			WorkerFailure.Require( tempIndex < tempPlan.Steps.Length && tempPlan.Steps[ tempIndex ].Name == tempMatch.Groups[ 2 ].Value, "Saved attempt does not match its plan" );
-			bool tempIsSavedValidationRequired = tempIndex == tempPlan.Steps.Length - 2 && tempPlan.Steps[ ^1 ].Name == "validation";
-			WorkerFailure.Require( tempIndex == tempPlan.Steps.Length - 1 || tempIsSavedValidationRequired, "Unfinished review stages remain; report recovery cannot replace missing work" );
+			WorkerFailure.Require( tempIndex < tempSteps.Length && tempSteps[ tempIndex ].Name == tempMatch.Groups[ 2 ].Value, "Saved attempt does not match its plan" );
+			bool tempIsSavedValidationRequired = tempIndex == tempSteps.Length - 2 && tempSteps[ ^1 ].Name == "validation";
+			WorkerFailure.Require( tempIndex == tempSteps.Length - 1 || tempIsSavedValidationRequired, "Unfinished review stages remain; report recovery cannot replace missing work" );
 			JsonObject tempMetadata = Storage.ReadObject( Path.Combine( tempAttempt, "attempt.json" ) );
 			ReviewResult tempResult = Storage.Read<ReviewResult>( Path.Combine( tempAttempt, "result.json" ), true );
-			WorkerFailure.Require( tempMetadata[ "step" ]?.GetValue<string>() == tempPlan.Steps[ tempIndex ].Name && tempMetadata[ "exit_code" ]?.GetValue<int>() == 0 && tempMetadata[ "status" ]?.GetValue<string>() == "executed" && tempResult.Outcome == "complete", "Saved review is incomplete; retry cannot invent missing work", "unfinished_review" );
+			WorkerFailure.Require( tempMetadata[ "step" ]?.GetValue<string>() == tempSteps[ tempIndex ].Name && tempMetadata[ "exit_code" ]?.GetValue<int>() == 0 && tempMetadata[ "status" ]?.GetValue<string>() == "executed" && tempResult.Outcome == "complete", "Saved review is incomplete; retry cannot invent missing work", "unfinished_review" );
 			string[] tempAttempts = [ .. Directory.GetDirectories( tempSource ).Where( x => File.Exists( Path.Combine( x, "attempt.json" ) ) ) ];
 			for ( int i = 0; i < tempIndex; ++i )
 			{
-				WorkerFailure.Require( tempAttempts.Any( x => ReviewContinuation.IsCompleted( x, tempPlan.Steps[ i ].Name ) ), "Saved review stage was not completed: " + tempPlan.Steps[ i ].Name );
+				WorkerFailure.Require( tempAttempts.Any( x => ReviewContinuation.IsCompleted( x, tempSteps[ i ].Name ) ), "Saved review stage was not completed: " + tempSteps[ i ].Name );
 			}
 			tReview.OutputTree = tempMetadata[ "output_tree" ]!.GetValue<string>();
 			Workspace.RequireSha( tReview.OutputTree );
@@ -48,7 +50,10 @@ namespace CPR.Worker.Recovery
 			tReview.Session = tempMetadata[ "session_id" ]?.GetValue<string>() ?? "";
 			tReview.IsFinal = true;
 			tReview.IsCommitRequired = tReview.OutputTree != await tReview.Workspace.GitAsync( [ "rev-parse", tReview.Head + "^{tree}" ], tCancel ) || !( await tReview.Workspace.GitResultAsync( [ "merge-base", "--is-ancestor", tReview.Target, tReview.Head ], tCancel ) ).IsSuccess;
-			string? tempKind = tempManifest[ "kind" ]?.GetValue<string>();
+			if ( tempKind == "head_reassessment" )
+			{
+				await HeadReassessment.RestoreAsync( tReview, tempSource, tempManifest, tCancel );
+			}
 			if ( tempKind is "merge_repair" or "feedback_repair" )
 			{
 				tReview.IsMergeRepair = true;
@@ -80,7 +85,7 @@ namespace CPR.Worker.Recovery
 			bool tempIsComplete = await new ReportCompletion( tReview ).CompleteAsync( tCancel );
 			if ( tempIsComplete && tempIsSavedValidationRequired )
 			{
-				tempIsComplete = await ValidateSavedAsync( tempPlan.Steps[ ^1 ].Name, tCancel );
+				tempIsComplete = await ValidateSavedAsync( tempSteps[ ^1 ].Name, tCancel );
 			}
 			Storage.Update( Path.Combine( tReview.Attempt, "attempt.json" ), x => { x[ "is_complete" ] = tempIsComplete; x[ "completed_at" ] = DateTimeOffset.UtcNow; } );
 			string tempGate = Storage.ReadText( Path.Combine( tReview.Attempt, "gate.txt" ) );

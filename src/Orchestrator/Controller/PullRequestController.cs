@@ -13,7 +13,7 @@ namespace CPR.Controller
 	public sealed class PullRequestController( Context tContext, QueueGate tGate, GitHubClient tGitHub, WorkerClient tWorkers, ReviewService tReviews, ReviewHistoryService tHistory, IOptions<Settings> tSettings ) : ControllerBase
 	{
 		public sealed record AddRequest( string Url );
-		public sealed record ReviewRequest( [MaxLength( 16000 )] string? Resolution );
+		public sealed record ReviewRequest( [MaxLength( 16000 )] string? Resolution, bool IsFull = false );
 
 		[HttpGet( "/api/status" )]
 		public async Task<IActionResult> GetStatusAsync( CancellationToken tCancel )
@@ -180,34 +180,34 @@ namespace CPR.Controller
 		[HttpDelete( "{id:long}" )]
 		public Task<IActionResult> RemoveAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, true, false, false, false, null, tCancel );
+			return ReviewOrRemoveAsync( tId, true, false, false, false, null, false, tCancel );
 		}
 
 		[HttpPost( "{id:long}/purge" )]
 		public Task<IActionResult> PurgeAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, true, true, false, false, null, tCancel );
+			return ReviewOrRemoveAsync( tId, true, true, false, false, null, false, tCancel );
 		}
 
 		[HttpPost( "{id:long}/review" )]
 		public Task<IActionResult> ReviewAsync( [FromRoute( Name = "id" )] long tId, [FromBody( EmptyBodyBehavior = EmptyBodyBehavior.Allow )] ReviewRequest? tRequest, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, false, false, false, false, tRequest?.Resolution, tCancel );
+			return ReviewOrRemoveAsync( tId, false, false, false, false, tRequest?.Resolution, tRequest?.IsFull == true || tRequest?.Resolution is not null, tCancel );
 		}
 
 		[HttpPost( "{id:long}/continue" )]
 		public Task<IActionResult> ContinueAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, false, false, false, true, null, tCancel );
+			return ReviewOrRemoveAsync( tId, false, false, false, true, null, false, tCancel );
 		}
 
 		[HttpPost( "{id:long}/retry" )]
 		public Task<IActionResult> RetryAsync( [FromRoute( Name = "id" )] long tId, CancellationToken tCancel )
 		{
-			return ReviewOrRemoveAsync( tId, false, false, true, false, null, tCancel );
+			return ReviewOrRemoveAsync( tId, false, false, true, false, null, false, tCancel );
 		}
 
-		private async Task<IActionResult> ReviewOrRemoveAsync( long tId, bool tIsRemoved, bool tIsPurge, bool tIsReportRetry, bool tIsContinuation, string? tResolution, CancellationToken tCancel )
+		private async Task<IActionResult> ReviewOrRemoveAsync( long tId, bool tIsRemoved, bool tIsPurge, bool tIsReportRetry, bool tIsContinuation, string? tResolution, bool tIsFull, CancellationToken tCancel )
 		{
 			PullRequest? tempRequest;
 			await tGate.Mutex.WaitAsync( tCancel );
@@ -221,7 +221,7 @@ namespace CPR.Controller
 					return NotFound();
 				}
 
-				if ( tIsContinuation && ( tempRequest.Status != PullRequestStatus.Blocked || tempRequest.WorkspaceWorkerId is null || tempRequest.WorkReason is not ( PullRequestWorkReason.InitialReview or PullRequestWorkReason.Rereview ) || ReviewRecovery.Read( tempRequest ).Category is not ( "attempt_limit" or "unfinished_review" or "required_check" or "missing_evidence" or "interrupted" or "transient" ) ) )
+				if ( tIsContinuation && ( tempRequest.Status != PullRequestStatus.Blocked || tempRequest.WorkspaceWorkerId is null || tempRequest.WorkReason is not ( PullRequestWorkReason.InitialReview or PullRequestWorkReason.Rereview ) || ReviewRecovery.Read( tempRequest ).Category is not ( "attempt_limit" or "unfinished_review" or "required_check" or "missing_evidence" or "interrupted" or "transient" or "infrastructure" ) ) )
 				{
 					return Conflict( new { Error = "Continue requires an unfinished full review with a saved workspace; resolve decisions with review --resolution, or use connect for manual repairs" } );
 				}
@@ -273,6 +273,21 @@ namespace CPR.Controller
 					return Conflict( new { Error = "PR head or destination changed; request a fresh review before reusing saved work" } );
 				}
 
+				ReviewRecovery tempSavedRecovery = ReviewRecovery.Read( tempRequest );
+				if ( tIsContinuation && tempSavedRecovery.Category == "infrastructure" )
+				{
+					if ( tempSavedRecovery.OperationId is null || tempRequest.WorkspaceWorker is null )
+					{
+						return Conflict( new { Error = "No saved worker operation is available to verify; use connect or request a fresh review" } );
+					}
+
+					WorkerReviewState tempState = await tWorkers.InspectReviewAsync( tempRequest.WorkspaceWorker, tempRequest, tempSavedRecovery.OperationId, tCancel );
+					if ( tempState.Status != "idle" || tempState.Category != "interrupted" || tempState.HeadSha != tempRequest.RemoteSha )
+					{
+						return Conflict( new { Error = "No compatible interrupted checkpoint was verified. " + tempState.Action } );
+					}
+				}
+
 				if ( tempRequest.Worker is not null )
 				{
 					await tHistory.CaptureAsync( tempRequest.Worker, tempRequest, tCancel );
@@ -320,12 +335,12 @@ namespace CPR.Controller
 						tempCurrent.RemoteSha = tempRemote.HeadSha;
 						if ( tIsContinuation )
 						{
-							new ReviewRecovery { IsContinuation = true, Action = "Continuing the saved review with a fresh bounded attempt allowance" }.Save( tempCurrent );
+							new ReviewRecovery { IsContinuation = true, IsFullReviewRequested = tempSavedRecovery.IsFullReviewRequested, Action = "Continuing the saved review with a fresh bounded attempt allowance" }.Save( tempCurrent );
 						}
 						else
 						{
 							tempCurrent.WorkReason = tIsReportRetry ? PullRequestWorkReason.ReportRetry : PullRequestWorkReason.Rereview;
-							tempCurrent.Recovery = "{}";
+							new ReviewRecovery { IsFullReviewRequested = tIsFull }.Save( tempCurrent );
 						}
 						tempCurrent.Status = PullRequestStatus.WaitingToBeProcessed;
 						tempCurrent.CompletedAt = null;

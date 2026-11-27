@@ -122,9 +122,9 @@ namespace CPR.Service.Review
 
 					if ( IsComplete( tempPendingManifest ) && IsSupplement( tempPendingManifest ) && tempPendingManifest.GetProperty( "previous_published_sha" ).GetString() == tRequest.PublishedSha )
 					{
-						string tempSessionKind = IsManual( tempPendingManifest ) ? "tweak" : IsMergeRepair( tempPendingManifest ) ? "merge" : "feedback";
+						string tempSessionKind = IsHeadReassessment( tempPendingManifest ) ? "head_reassessment" : IsManual( tempPendingManifest ) ? "tweak" : IsMergeRepair( tempPendingManifest ) ? "merge" : "feedback";
 						string tempSessionId = tempPendingManifest.TryGetProperty( $"{tempSessionKind}_session_id", out JsonElement tempSession ) ? tempSession.GetString()! : $"{tempPendingRun.WorkerId}/{tempPendingRun.RunKey}";
-						string tempTitle = tempSessionKind == "tweak" ? "Manual session" : tempSessionKind == "merge" ? "Target integration" : "CodeRabbit repair";
+						string tempTitle = tempSessionKind switch { "head_reassessment" => "PR head reassessment", "tweak" => "Manual session", "merge" => "Target integration", _ => "CodeRabbit repair" };
 						string tempSessionBody = ReadBody( tempPendingRun, tempPendingManifest.GetProperty( "head_sha" ).GetString()!, tempPendingManifest.GetProperty( "reviewed_tree" ).GetString()!, tempPendingManifest.GetProperty( "target_sha" ).GetString()! );
 						tempSessions[ tempSessionId ] = (tempPendingRun.ReviewRunId, tempSessionBody, tempTitle);
 					}
@@ -179,7 +179,12 @@ namespace CPR.Service.Review
 
 		private static bool IsSupplement( JsonElement tManifest )
 		{
-			return IsManual( tManifest ) || IsMergeRepair( tManifest ) || ( tManifest.TryGetProperty( "kind", out JsonElement tempKind ) && tempKind.GetString() == "feedback_repair" ) || ( tManifest.TryGetProperty( "review_scope", out JsonElement tempScope ) && tempScope.GetString() == "feedback_repair" );
+			return IsManual( tManifest ) || IsMergeRepair( tManifest ) || IsHeadReassessment( tManifest ) || ( tManifest.TryGetProperty( "kind", out JsonElement tempKind ) && tempKind.GetString() == "feedback_repair" ) || ( tManifest.TryGetProperty( "review_scope", out JsonElement tempScope ) && tempScope.GetString() == "feedback_repair" );
+		}
+
+		private static bool IsHeadReassessment( JsonElement tManifest )
+		{
+			return ( tManifest.TryGetProperty( "kind", out JsonElement tempKind ) && tempKind.GetString() == "head_reassessment" ) || ( tManifest.TryGetProperty( "review_scope", out JsonElement tempScope ) && tempScope.GetString() == "head_reassessment" );
 		}
 
 		private static bool IsMergeRepair( JsonElement tManifest )

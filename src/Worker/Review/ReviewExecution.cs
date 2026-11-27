@@ -29,13 +29,16 @@ namespace CPR.Worker.Review
 		public string[] OriginalPaths { get; set; } = [];
 		public string[] ConflictPaths { get; set; } = [];
 		public string[] FeedbackPaths { get; set; } = [];
+		public string[] HeadReassessmentPaths { get; set; } = [];
 		public FeedbackComment[] Feedback { get; set; }
 		public bool IsMergeRepair { get; set; }
 		public bool IsFeedbackRepair { get; set; }
+		public bool IsHeadReassessment { get; set; }
 		public bool IsHistorical { get; set; }
 		public bool IsFinal { get; set; }
 		public bool IsCommitRequired { get; set; }
-		public string CommentScope => IsMergeRepair || IsFeedbackRepair || Plan.PublishedSha is not null ? "commit_summary" : "full_review";
+		public string CommentScope => IsMergeRepair || IsFeedbackRepair || IsHeadReassessment || Plan.PublishedSha is not null ? "commit_summary" : "full_review";
+		public ReviewStep[] Steps => IsHeadReassessment ? [ Plan.HeadReassessmentStep! ] : Plan.Steps;
 
 		public ReviewExecution( Workspace tWorkspace, ReviewPlan tPlan )
 		{
@@ -71,9 +74,9 @@ namespace CPR.Worker.Review
 		public async Task<ReviewScope> ScopeAsync( string tTree, CancellationToken tCancel )
 		{
 			string[] tempChanged = ( await Workspace.GitAsync( [ "diff", "--no-renames", "--name-only", "-z", ScopeBase ?? Head, tTree ], tCancel ) ).Split( '\0', StringSplitOptions.RemoveEmptyEntries );
-			IEnumerable<string> tempRequired = IsFeedbackRepair ? ConflictPaths.Concat( FeedbackPaths ).Concat( Feedback.Where( x => x.Path.Length > 0 ).Select( x => x.Path ) ) : IsMergeRepair ? ConflictPaths : OriginalPaths;
+			IEnumerable<string> tempRequired = IsHeadReassessment ? HeadReassessmentPaths : IsFeedbackRepair ? ConflictPaths.Concat( FeedbackPaths ).Concat( Feedback.Where( x => x.Path.Length > 0 ).Select( x => x.Path ) ) : IsMergeRepair ? ConflictPaths : OriginalPaths;
 
-			return new() { ComparisonBaseSha = Comparison, HeadSha = Head, TargetSha = Target, OriginalPrPaths = OriginalPaths, WorkingTreePaths = tempChanged, ScopeKind = IsFeedbackRepair ? "feedback_repair" : IsMergeRepair ? "merge_repair" : "full_review", ConflictPaths = ConflictPaths, RequiredPaths = [ .. tempRequired.Concat( tempChanged ).Distinct( StringComparer.Ordinal ).Order( StringComparer.Ordinal ) ] };
+			return new() { ComparisonBaseSha = Comparison, HeadSha = Head, TargetSha = Target, OriginalPrPaths = OriginalPaths, WorkingTreePaths = tempChanged, ScopeKind = IsHeadReassessment ? "head_reassessment" : IsFeedbackRepair ? "feedback_repair" : IsMergeRepair ? "merge_repair" : "full_review", ConflictPaths = ConflictPaths, RequiredPaths = [ .. tempRequired.Concat( tempChanged ).Distinct( StringComparer.Ordinal ).Order( StringComparer.Ordinal ) ] };
 		}
 
 		public async Task RequireUnchangedAsync( CancellationToken tCancel )

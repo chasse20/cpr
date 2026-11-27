@@ -26,7 +26,7 @@ namespace CPR.Worker.Review
 				else
 				{
 					int tempStart = await new ReviewContinuation( _review ).ResumeAsync( tCancel );
-					for ( int i = tempStart, tempCount = _review.Plan.Steps.Length; i < tempCount; ++i )
+					for ( int i = tempStart, tempCount = _review.Steps.Length; i < tempCount; ++i )
 					{
 						await RunStepAsync( i, tCancel );
 					}
@@ -187,6 +187,10 @@ namespace CPR.Worker.Review
 			WorkerFailure.Require( _review.Session.Length == 0 || Regex.IsMatch( _review.Session, "^[A-Za-z0-9_-]{6,128}$" ), "Invalid saved Codex session" );
 			_review.Comparison = await tempWorkspace.GitAsync( [ "merge-base", _review.Head, _review.Target ], tCancel );
 			_review.OriginalPaths = ( await tempWorkspace.GitAsync( [ "diff", "--no-renames", "--name-only", "-z", _review.Comparison, _review.Head ], tCancel ) ).Split( '\0', StringSplitOptions.RemoveEmptyEntries );
+			if ( !tempPlan.IsContinuation && tempPlan.HeadReassessmentStep is not null )
+			{
+				await HeadReassessment.SelectAsync( _review, tCancel );
+			}
 			if ( _review.IsMergeRepair || _review.IsFeedbackRepair )
 			{
 				_review.ConflictPaths = ( await tempWorkspace.GitAsync( [ "diff", "--name-only", "--diff-filter=U", "-z" ], tCancel ) ).Split( '\0', StringSplitOptions.RemoveEmptyEntries );
@@ -220,8 +224,8 @@ namespace CPR.Worker.Review
 
 		private async Task RunStepAsync( int tIndex, CancellationToken tCancel )
 		{
-			ReviewStep tempStep = _review.Plan.Steps[ tIndex ];
-			_review.IsFinal = tIndex == _review.Plan.Steps.Length - 1;
+			ReviewStep tempStep = _review.Steps[ tIndex ];
+			_review.IsFinal = tIndex == _review.Steps.Length - 1;
 			string tempPriorStage = _review.Attempt;
 
 			int tempNumber = 0;

@@ -8,6 +8,7 @@ namespace CPR.Service.Review
 		public int Attempts { get; set; }
 		public bool IsPending { get; set; }
 		public bool IsContinuation { get; set; }
+		public bool IsFullReviewRequested { get; set; }
 		public PullRequestWorkReason? ResumeWorkReason { get; set; }
 		public DateTimeOffset? NextAttemptAt { get; set; }
 		public string? Category { get; set; }

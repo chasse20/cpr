@@ -76,7 +76,7 @@ Build targets and disposable review scratch are retained per job across retries 
 
 Use `cpr continue ID` to resume a blocked, unfinished full review with a fresh bounded attempt allowance. It preserves the checkout, compatible completed stages, evidence, decisions, and the recorded target. Automatic retries retain the current allowance; reaching the limit stops immediately with the unfinished work recorded. Final validation and separate publication approval remain required.
 
-Use `cpr review ID` to request a full rereview, `cpr retry ID` for a failed report with sufficient saved evidence, and `cpr cancel ID` to stop an automated review while preserving work. `cpr help` lists all commands.
+Use `cpr review ID` to reassess changes, `cpr review ID --full` for a full rereview, `cpr retry ID` for a failed report with sufficient saved evidence, and `cpr cancel ID` to stop an automated review while preserving work. `cpr help` lists all commands.
 
 ## CodeRabbit and CI
 

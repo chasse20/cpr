@@ -184,6 +184,11 @@ namespace CPR.Service.SSH
 					tempCategory = tempData.RootElement.GetProperty( "category" ).GetString()!;
 					tempFailure = tempData.RootElement.GetProperty( "action" ).GetString()!;
 				}
+				else if ( tOperation == "run" && string.IsNullOrWhiteSpace( tempFailure ) )
+				{
+					tempCategory = "interrupted";
+					tempFailure = $"Worker exited {tempResult.ExitCode} without diagnostics. Check the registered operation and saved checkout before resuming.";
+				}
 
 				throw new ReviewFailureException( tempCategory, $"Worker {tWorker.WorkerId} {tOperation} failed: {tempFailure}" );
 			}

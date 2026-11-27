@@ -237,6 +237,21 @@ namespace CPR.Service.Review
 			ReviewStep? tempRecovery = tempRecoverySettings.IsEnabled ? new( tempRecoverySettings.Name, tempRecoverySettings.Model, tempRecoverySettings.ReasoningEffort, 1, PromptRenderer.Render( tempPrompts[ PromptKind.ReportRecovery ], tRequest ) ) : null;
 			ReviewStepSettings tempValidation = tSettings.Value.ReviewSteps.Last( x => x.IsEnabled );
 			ReviewStep tempSavedValidation = new( "saved-validation", tempValidation.Model, "low", 1, PromptRenderer.Render( tempPrompts[ PromptKind.SavedValidation ], tRequest ) );
+			ReviewStep? tempHeadReassessment = null;
+
+			if ( !tempIsReportRetry && tRequest.WorkReason == PullRequestWorkReason.Rereview && tRequest.PublishedSha is null && !ReviewRecovery.Read( tRequest ).IsFullReviewRequested )
+			{
+				using IServiceScope tempScope = tScopes.CreateScope();
+				tempPriorReview = await ReviewComment.FindFullReportAsync( tempScope.ServiceProvider.GetRequiredService<Context>(), tRequest, tCancel );
+
+				if ( tempPriorReview is not null && tempPriorReview.HeadSha != tRequest.RemoteSha )
+				{
+					const string tempAssignment = "Reassess the changed PR head in a single final pass. The scope inventory includes source and target deltas, differences from the prior reviewed tree, and any repairs you make. Reconcile archived unpublished repairs, inspect changed functions and affected callers, and run the relevant final checks. Use the original review only as historical evidence for inputs you verify still match, and record any changed evidence boundaries. Assess relevance, correctness, cleanup, optimization, memory and the final diff within this scope. Explain what changed since the prior full review, what was reused, and any remaining limitations in pr_comment.";
+					string tempFocusedPrompt = string.Join( "\n\n", new[] { PromptKind.Correctness, PromptKind.Cleanup, PromptKind.Evidence }.Select( x => PromptRenderer.Render( tempPrompts[ x ], tRequest ) ) );
+					tempHeadReassessment = new( "head-reassessment", tempValidation.Model, tempValidation.ReasoningEffort, 1, tempAssignment + "\n\n" + tempFocusedPrompt );
+				}
+			}
+
 			ReviewPlan tempPlan = new
 			(
 				HeadSha: tRequest.RemoteSha,
@@ -256,7 +271,8 @@ namespace CPR.Service.Review
 				Feedback: tempFeedback,
 				ApprovedTreeSha: tempIsReportRetry ? null : tRequest.ApprovedSha,
 				IsContinuation: ReviewRecovery.Read( tRequest ).IsContinuation,
-				RecoveryAttempt: ReviewRecovery.Read( tRequest ).Attempts
+				RecoveryAttempt: ReviewRecovery.Read( tRequest ).Attempts,
+				HeadReassessmentStep: tempHeadReassessment
 			);
 
 			return await tWorkers.ExecuteAsync( tWorker, tRequest, tempPlan, tCancel );

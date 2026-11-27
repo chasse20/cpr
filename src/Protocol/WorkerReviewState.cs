@@ -1,4 +1,4 @@
 namespace CPR.Protocol
 {
-	public sealed record WorkerReviewState( string Status, string? Category, string? Action, WorkerSnapshot? Snapshot );
+	public sealed record WorkerReviewState( string Status, string? Category, string? Action, WorkerSnapshot? Snapshot, string? HeadSha = null );
 }
