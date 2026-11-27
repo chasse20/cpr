@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Security.Cryptography;
 using CPR.Worker.Execution;
 
@@ -68,6 +69,34 @@ namespace CPR.Worker.Persistence
 			WorkerFailure.Require( tempPath.StartsWith( tArtifacts + "/evidence/", StringComparison.Ordinal ) && File.Exists( tempPath ), $"Missing regular evidence file: {tRelative}", "missing_evidence" );
 
 			return tempPath;
+		}
+
+		public static bool EvidenceContains( string tArtifacts, string tRelative, string tExcerpt )
+		{
+			if ( tExcerpt.Length is < 8 or > 1000 )
+			{
+				return false;
+			}
+
+			using FileStream tempFile = File.OpenRead( Evidence( tArtifacts, tRelative ) );
+			using Stream tempStream = tRelative.EndsWith( ".gz", StringComparison.OrdinalIgnoreCase ) ? new GZipStream( tempFile, CompressionMode.Decompress ) : tempFile;
+			using StreamReader tempReader = new( tempStream );
+			char[] tempBuffer = new char[ 4096 + tExcerpt.Length - 1 ];
+			int tempRetained = 0;
+			int tempRead;
+			while ( ( tempRead = tempReader.ReadBlock( tempBuffer.AsSpan( tempRetained, 4096 ) ) ) > 0 )
+			{
+				Span<char> tempText = tempBuffer.AsSpan( 0, tempRetained + tempRead );
+				if ( tempText.Contains( tExcerpt.AsSpan(), StringComparison.Ordinal ) )
+				{
+					return true;
+				}
+
+				tempRetained = Math.Min( tempText.Length, tExcerpt.Length - 1 );
+				tempText[ ^tempRetained.. ].CopyTo( tempBuffer );
+			}
+
+			return false;
 		}
 
 		public static void CopyDirectory( string tSource, string tDestination )

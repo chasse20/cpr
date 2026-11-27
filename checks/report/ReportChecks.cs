@@ -1,4 +1,6 @@
+using System.IO.Compression;
 using CPR.Worker.Execution;
+using CPR.Worker.Persistence;
 using CPR.Worker.Reports;
 using CPR.Worker.Review;
 
@@ -8,6 +10,7 @@ namespace CPR.Checks
 	{
 		public static void Run()
 		{
+			CheckEvidenceExcerpts();
 			ReviewResult tempResult = Result();
 			tempResult.Checks = [ Command( "first", "CARGO_TARGET_DIR=/tmp/build cargo clippy --workspace", "failed", 101 ), Command( "retry", "CARGO_TARGET_DIR=/state/build cargo clippy --workspace", "passed", 0 ) ];
 			tempResult.Coverage[ "correctness" ].Status = "verified";
@@ -57,6 +60,25 @@ namespace CPR.Checks
 			ReportValidator.ValidateScope( tempAudit, tempScope, tempScopeResult );
 			Check.That( tempAudit.Exclusions.Single().Paths.SequenceEqual( [ "needed.rs" ] ), "Required exclusion path remains" );
 
+			ScopeAudit tempBadReferences = Audit( [ "needed.rs" ] );
+			tempBadReferences.Exclusions = [];
+			tempBadReferences.Files =
+			[
+				new ScopeFile { Path = "needed.rs", Scope = "Reviewed implementation", Rules = ReportValidator.ScopeRules.ToDictionary( x => x, x => new Assessment { Status = "inspected", Details = "Inspected", Checks = [] } ) }
+			];
+			tempBadReferences.Files[ 0 ].Rules[ "optimization" ].Checks.Add( "unknown-optimization" );
+			tempBadReferences.Files[ 0 ].Rules[ "memory" ].Checks.Add( "unknown-memory" );
+			string tempDiagnostics = "";
+			try
+			{
+				ReportValidator.ValidateScope( tempBadReferences, tempScope, tempScopeResult );
+			}
+			catch ( WorkerFailure tException )
+			{
+				tempDiagnostics = tException.Message;
+			}
+			Check.That( tempDiagnostics.Contains( "unknown-optimization" ) && tempDiagnostics.Contains( "unknown-memory" ), "Scope validation reports all invalid evidence references together" );
+
 			ScopeAudit tempMissing = Audit( [ "obsolete.rs" ] );
 			Check.That( ReportValidator.Normalize( tempScopeResult, tempMissing, tempScope ).Length == 0 && tempMissing.Exclusions.Single().Paths.SequenceEqual( [ "obsolete.rs" ] ), "Missing required paths cannot be repaired by trimming exclusions" );
 			bool tempRejected = false;
@@ -69,6 +91,33 @@ namespace CPR.Checks
 				tempRejected = true;
 			}
 			Check.That( tempRejected, "Missing required scope still blocks" );
+		}
+
+		private static void CheckEvidenceExcerpts()
+		{
+			DirectoryInfo tempDirectory = Directory.CreateTempSubdirectory( "cpr-evidence-" );
+			try
+			{
+				string tempEvidence = Path.Combine( tempDirectory.FullName, "evidence" );
+				Directory.CreateDirectory( tempEvidence );
+				const string tempExcerpt = "the regression failed";
+				string tempLog = new string( 'x', 4090 ) + tempExcerpt + "\n";
+				File.WriteAllText( Path.Combine( tempEvidence, "before.log" ), tempLog );
+				using ( FileStream tempFile = File.Create( Path.Combine( tempEvidence, "before.log.gz" ) ) )
+				using ( GZipStream tempGzip = new( tempFile, CompressionMode.Compress ) )
+				using ( StreamWriter tempWriter = new( tempGzip ) )
+				{
+					tempWriter.Write( tempLog );
+				}
+
+				Check.That( Storage.EvidenceContains( tempDirectory.FullName, "evidence/before.log", tempExcerpt ), "Plain evidence matches across read boundaries" );
+				Check.That( Storage.EvidenceContains( tempDirectory.FullName, "evidence/before.log.gz", tempExcerpt ), "Compressed evidence matches across read boundaries" );
+				Check.That( !Storage.EvidenceContains( tempDirectory.FullName, "evidence/before.log.gz", "the regression passed" ), "Compressed evidence still rejects a missing excerpt" );
+			}
+			finally
+			{
+				tempDirectory.Delete( true );
+			}
 		}
 
 		private static ReviewResult Result() => new()

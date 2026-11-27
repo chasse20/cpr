@@ -86,6 +86,7 @@ namespace CPR.Worker.Recovery
 			File.Copy( Path.Combine( tReview.Attempt, "result.json" ), Path.Combine( tempDirectory, "original-result.json" ), true );
 			File.Copy( Path.Combine( tReview.Attempt, "gate.txt" ), Path.Combine( tempDirectory, "original-gate.txt" ), true );
 			string tempPrompt = tReview.Plan.RecoveryStep!.Prompt + $"\nDiagnose this saved report:\n- Result: {tempDirectory}/original-result.json\n- Completion errors: {tempDirectory}/original-gate.txt\n- Scope inventory: {tReview.Attempt}/output-scope.json\n- Retained artifacts: {tReview.Artifacts}\n- Original attempt: {Storage.ReadObject( Path.Combine( tReview.Attempt, "attempt.json" ) )[ "reused_from" ]}\n- Reviewed head: {tReview.Head}; target: {tReview.Target}; tree: {tReview.OutputTree}\n- The live checkout may contain later work. It is outside this recovery.";
+			tempPrompt += "\nFor a verified per-file assessment only, one exception to the existing passing-reference rule is allowed. If the assessment already cites other passing evidence, you may replace a historical failure with its exact passing successor when you propose the same before/after pair for verified top-level correctness in this diagnosis. Provide the matching literal excerpts for both repairs. Keep every other existing reference.";
 			int tempCode = await tReview.RunAuxiliaryAsync( "report-recovery", tReview.Plan.RecoveryStep, tempPrompt, tCancel );
 			if ( tempCode != 0 )
 			{
@@ -153,7 +154,7 @@ namespace CPR.Worker.Recovery
 
 				return tempIsAccepted;
 			}
-			catch ( Exception tException ) when ( tException is JsonException or IOException or WorkerFailure { Category: not ( "cancelled" or "snapshot" ) } )
+			catch ( Exception tException ) when ( tException is JsonException or IOException or InvalidDataException or WorkerFailure { Category: not ( "cancelled" or "snapshot" ) } )
 			{
 				File.AppendAllText( Path.Combine( tReview.Attempt, "gate.txt" ), "\nRecovery rejected: " + tException.Message );
 
@@ -165,6 +166,10 @@ namespace CPR.Worker.Recovery
 		{
 			WorkerFailure.Require( tResult.Outcome == "complete" && tDiagnosis.Category == "report_metadata" && tDiagnosis.ReferenceRepairs.Length <= 16 && ( tDiagnosis.ReferenceRepairs.Length > 0 || tDiagnosis.ResourceRepair is not null ), "Recovery cannot complete unfinished work or unsupported corrections", "report_metadata" );
 			WorkerFailure.Require( tDiagnosis.ReferenceRepairs.Select( x => ( x.Path, x.Area, x.FeedbackKey, x.FailedCheck ) ).Distinct().Count() == tDiagnosis.ReferenceRepairs.Length, "Duplicate recovery correction", "report_metadata" );
+			Assessment? tempCorrectness = tResult.Coverage.GetValueOrDefault( "correctness" );
+			HashSet<(string, string)> tempCorrectnessPairs = tempCorrectness?.Status == "verified"
+				? tDiagnosis.ReferenceRepairs.Where( x => x.Path.Length == 0 && x.Area == "correctness" && tempCorrectness.Checks.Contains( x.FailedCheck ) && tempCorrectness.Checks.Contains( x.PassedCheck ) ).Select( x => ( x.FailedCheck, x.PassedCheck ) ).ToHashSet()
+				: [];
 			foreach ( ReferenceRepair tempRepair in tDiagnosis.ReferenceRepairs )
 			{
 				ReviewCheck[] tempBefore = [ .. tResult.Checks.Where( x => x.Id == tempRepair.FailedCheck ) ];
@@ -194,8 +199,13 @@ namespace CPR.Worker.Recovery
 						ScopeFile[] tempFiles = [ .. tAudit.Files.Where( x => x.Path == tempRepair.Path ) ];
 						tempAssessment = tempFiles.Length == 1 && ReportValidator.ScopeRules.Contains( tempRepair.Area ) ? tempFiles[ 0 ].Rules.GetValueOrDefault( tempRepair.Area ) : null;
 					}
-					WorkerFailure.Require( tempAssessment is not null && tempAssessment.Status == "verified" && tempAssessment.Checks.Contains( tempRepair.FailedCheck ) && tempAssessment.Checks.Contains( tempRepair.PassedCheck ), "Both checks must already support the same verified assessment", "report_metadata" );
-					tempAssessment!.Checks.RemoveAll( x => x == tempRepair.FailedCheck );
+				WorkerFailure.Require( tempAssessment is not null && tempAssessment.Status == "verified" && tempAssessment.Checks.Contains( tempRepair.FailedCheck ), "The historical check must already support the verified assessment", "report_metadata" );
+				if ( !tempAssessment!.Checks.Contains( tempRepair.PassedCheck ) )
+				{
+					WorkerFailure.Require( tempRepair.Path.Length > 0 && tempCorrectnessPairs.Contains( ( tempRepair.FailedCheck, tempRepair.PassedCheck ) ) && tResult.Checks.Any( x => x.Status == "passed" && tempAssessment.Checks.Contains( x.Id ) ), "The passing check must already support the verified assessment or be the same successor verified for top-level correctness", "report_metadata" );
+					tempAssessment.Checks.Add( tempRepair.PassedCheck );
+				}
+				tempAssessment.Checks.RemoveAll( x => x == tempRepair.FailedCheck );
 				}
 			}
 			if ( tDiagnosis.ResourceRepair is ResourceRepair tempResourceRepair )
@@ -217,7 +227,7 @@ namespace CPR.Worker.Recovery
 
 		private void RequireExcerpt( ReviewCheck tCheck, string tExcerpt )
 		{
-			WorkerFailure.Require( tExcerpt.Length is >= 8 and <= 1000 && File.ReadAllText( Storage.Evidence( tReview.Artifacts, tCheck.Artifact ) ).Contains( tExcerpt, StringComparison.Ordinal ), "Recovery evidence excerpt was not found in " + tCheck.Artifact, "report_metadata" );
+			WorkerFailure.Require( Storage.EvidenceContains( tReview.Artifacts, tCheck.Artifact, tExcerpt ), "Recovery evidence excerpt was not found in " + tCheck.Artifact, "report_metadata" );
 		}
 	}
 }

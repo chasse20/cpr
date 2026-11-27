@@ -131,15 +131,20 @@ namespace CPR.Worker.Reports
 			string[] tempCovered = [ .. tAudit.Files.Select( x => x.Path ), .. tAudit.Exclusions.SelectMany( x => x.Paths ) ];
 			WorkerFailure.Require( tempCovered.Distinct( StringComparer.Ordinal ).Count() == tempCovered.Length, "Scope audit covers a path more than once", "report_metadata" );
 			WorkerFailure.Require( tempCovered.Order( StringComparer.Ordinal ).SequenceEqual( tScope.RequiredPaths.Order( StringComparer.Ordinal ) ), "Scope audit must cover exactly the required paths: " + JsonSerializer.Serialize( tScope.RequiredPaths ), "unfinished_review" );
+			List<string> tempErrors = [];
 			foreach ( ScopeFile tempFile in tAudit.Files )
 			{
-				WorkerFailure.Require( tempFile.Rules.Keys.Order( StringComparer.Ordinal ).SequenceEqual( ScopeRules ), tempFile.Path + " must assess naming, spacing, comments, organization, optimization, and memory", "unfinished_review" );
+				if ( !tempFile.Rules.Keys.Order( StringComparer.Ordinal ).SequenceEqual( ScopeRules ) )
+				{
+					tempErrors.Add( tempFile.Path + " must assess naming, spacing, comments, organization, optimization, and memory" );
+				}
 				foreach ( KeyValuePair<string, Assessment> tempRule in tempFile.Rules )
 				{
-					string[] tempErrors = [ .. ValidateAssessment( tempRule.Value, tempFile.Path + ": " + tempRule.Key, tResult.Checks, tIsIncompleteAllowed ) ];
-					WorkerFailure.Require( tempErrors.Length == 0, string.Join( "\n", tempErrors ), "unfinished_review" );
+					tempErrors.AddRange( ValidateAssessment( tempRule.Value, tempFile.Path + ": " + tempRule.Key, tResult.Checks, tIsIncompleteAllowed ) );
 				}
 			}
+
+			WorkerFailure.Require( tempErrors.Count == 0, string.Join( '\n', tempErrors ), "unfinished_review" );
 		}
 
 		public static void ValidateFeedback( FeedbackDisposition[] tItems, FeedbackComment[] tFeedback, ReviewResult tResult )
